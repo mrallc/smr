@@ -1,0 +1,9 @@
+[submodule "com.xoba.amazonaws"]
+	path = com.xoba.amazonaws
+	url = git@github.com:xoba/com.xoba.amazonaws.git
+[submodule "mra-lib"]
+	path = mra-lib
+	url = git@github.com:xoba/mra-lib.git
+[submodule "com.xoba.apache"]
+	path = com.xoba.apache
+	url = git@github.com:xoba/com.xoba.apache.git
