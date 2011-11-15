@@ -361,6 +361,10 @@ public class SMRDriver {
 								}
 							});
 
+							if (s3Keys.size() != countCommitted(aws, dom, "mapped")) {
+								throw new Exception("missing some map outputs");
+							}
+
 							final Map<MyByteBuffer, File> files = new HashMap<MyByteBuffer, File>();
 							final Map<MyByteBuffer, OutputStream> writers = new HashMap<MyByteBuffer, OutputStream>();
 
@@ -484,6 +488,39 @@ public class SMRDriver {
 		private final int hc;
 		private final byte[] buf;
 
+	}
+
+	private static long countCommitted(AWSCredentials aws, final String dom, String countAttr) throws Exception {
+
+		final AmazonSimpleDB db = new AmazonSimpleDBClient(aws);
+
+		long foundCommitted = 0;
+		String expr = "select * from " + dom;
+		SelectResult sr = db.select(new SelectRequest(expr, true));
+		boolean done = false;
+		while (!done) {
+			List<Item> items = sr.getItems();
+			for (Item i : items) {
+				String name = i.getName();
+				Map<String, String> map = new HashMap<String, String>();
+				for (Attribute a : i.getAttributes()) {
+					map.put(a.getName(), a.getValue());
+				}
+				if (map.containsKey(countAttr)) {
+					foundCommitted += new Long(map.get(countAttr));
+				}
+			}
+			String t = sr.getNextToken();
+			if (t == null) {
+				done = true;
+			} else {
+				SelectRequest req = new SelectRequest(expr, true);
+				req.setNextToken(t);
+				sr = db.select(req);
+			}
+		}
+
+		return foundCommitted;
 	}
 
 	private static boolean isDone(AWSCredentials aws, final String dom, String item, String targetAttr, String countAttr)
