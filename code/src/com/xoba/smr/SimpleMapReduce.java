@@ -9,7 +9,6 @@ import java.io.PrintWriter;
 import java.io.StringReader;
 import java.io.StringWriter;
 import java.net.URI;
-import java.util.Collections;
 import java.util.Formatter;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -36,7 +35,6 @@ import com.amazonaws.services.ec2.model.RunInstancesResult;
 import com.amazonaws.services.ec2.model.Tag;
 import com.amazonaws.services.s3.AmazonS3;
 import com.amazonaws.services.s3.AmazonS3Client;
-import com.amazonaws.services.s3.model.S3ObjectSummary;
 import com.amazonaws.services.simpledb.AmazonSimpleDB;
 import com.amazonaws.services.simpledb.AmazonSimpleDBClient;
 import com.amazonaws.services.simpledb.model.CreateDomainRequest;
@@ -47,14 +45,12 @@ import com.amazonaws.services.sqs.model.CreateQueueRequest;
 import com.amazonaws.services.sqs.model.DeleteQueueRequest;
 import com.amazonaws.services.sqs.model.SendMessageRequest;
 import com.xoba.amazonaws.AWSUtils;
-import com.xoba.amazonaws.AWSUtils.IBucketListener;
 import com.xoba.smr.impl.AsciiTSVReader;
 import com.xoba.smr.impl.AsciiTSVWriter;
 import com.xoba.smr.impl.ValuePrefixCountingMapper;
 import com.xoba.smr.impl.ValueSummingReducer;
 import com.xoba.util.ILogger;
 import com.xoba.util.LogFactory;
-import com.xoba.util.MraStats;
 import com.xoba.util.MraUtils;
 
 public class SimpleMapReduce {
@@ -68,22 +64,19 @@ public class SimpleMapReduce {
 		logger.debugf("test sequence = %d", testSequence);
 
 		final int hashCardinality = 3;
+		final int machineCount = 1;
 
 		AWSCredentials aws = createCreds();
 
 		final String uniquePrefix = "smr-" + MraUtils.md5Hash(aws.getAWSAccessKeyId()).substring(0, 8) + "-"
 				+ testSequence;
 
-		final String testInputBucket = prefixedName(uniquePrefix, "mapinputs");
-
-		populateTestBucket(5, testInputBucket);
-
-		AmazonS3 s3 = getS3(aws);
+		final String inputBucket = "...";
 
 		AmazonSimpleDB db = new AmazonSimpleDBClient(aws);
 		AmazonSQS sqs = new AmazonSQSClient(aws);
 
-		Properties config = createIdempotentContext(aws, uniquePrefix, testInputBucket);
+		Properties config = createIdempotentContext(aws, uniquePrefix, inputBucket);
 
 		final String mapQueue = config.getProperty(ConfigKey.MAP_QUEUE.toString());
 		final String reduceQueue = config.getProperty(ConfigKey.REDUCE_QUEUE.toString());
@@ -94,44 +87,17 @@ public class SimpleMapReduce {
 		final String shuffleBucket = config.getProperty(ConfigKey.SHUFFLE_BUCKET.toString());
 		final String reduceOutputBucket = config.getProperty(ConfigKey.REDUCE_OUTPUTS_BUCKET.toString());
 
-		List<String> inputSplitKeys = new LinkedList<String>();
+		List<String> inputSplitPrefixes = new LinkedList<String>();
 
 		{
-			final Map<String, Long> keyMap = new HashMap<String, Long>();
-
-			AWSUtils.scanObjectsInBucket(s3, mapInputBucket, new IBucketListener() {
-
-				@Override
-				public void done() {
-
-				}
-
-				@Override
-				public boolean add(S3ObjectSummary s) {
-					String key = s.getKey();
-					keyMap.put(key, s.getSize());
-					return true;
-				}
-			});
-
-			logger.debugf("%,d keys; %,.0f bytes", keyMap.size(), MraStats.sum(keyMap.values()));
-
-			inputSplitKeys.addAll(keyMap.keySet());
-
-			if (false) {
-				Collections.shuffle(inputSplitKeys);
-				while (inputSplitKeys.size() > 1) {
-					inputSplitKeys.remove(0);
-				}
-			}
-
+			// add key prefixes to inputSplitPrefixes here...
 		}
 
-		logger.debugf("using %,d keys", inputSplitKeys.size());
+		logger.debugf("using %,d key prefixes", inputSplitPrefixes.size());
 
-		final long inputSplits = inputSplitKeys.size();
+		final long inputSplitCount = inputSplitPrefixes.size();
 
-		for (String key : inputSplitKeys) {
+		for (String key : inputSplitPrefixes) {
 			Properties p = new Properties();
 			p.setProperty("input", "s3://" + mapInputBucket + "/" + key);
 			p.setProperty("output", "s3://" + shuffleBucket);
@@ -139,7 +105,7 @@ public class SimpleMapReduce {
 			sqs.sendMessage(new SendMessageRequest(mapQueue, serialize(p)));
 		}
 
-		SimpleDbCommitter.commitNewAttribute(db, dom, "parameters", "splits", "" + inputSplits);
+		SimpleDbCommitter.commitNewAttribute(db, dom, "parameters", "splits", "" + inputSplitCount);
 		SimpleDbCommitter.commitNewAttribute(db, dom, "parameters", "hashes", "" + hashCardinality);
 		SimpleDbCommitter.commitNewAttribute(db, dom, "parameters", "done", "1");
 
@@ -150,17 +116,17 @@ public class SimpleMapReduce {
 			sqs.sendMessage(new SendMessageRequest(reduceQueue, serialize(p)));
 		}
 
-		if (true) {
+		if (machineCount == 1) {
 			// run locally
 			SMRDriver.main(new String[] { MraUtils.convertToHex(serialize(config).getBytes()) });
-		} else {
+		} else if (machineCount > 1) {
 			// run in the cloud
 			AmazonEC2 ec2 = new AmazonEC2Client(aws);
 			AmazonInstance ai = AmazonInstance.M2_4XLARGE;
 			String ud = produceUserData(ai, config,
 					new URI(config.getProperty(ConfigKey.RUNNABLE_JARFILE_URI.toString())));
 			System.out.println(ud);
-			RunInstancesRequest req = new RunInstancesRequest(ai.getDefaultAMI(), 20, 20);
+			RunInstancesRequest req = new RunInstancesRequest(ai.getDefaultAMI(), machineCount, machineCount);
 			req.setInstanceType(ai.getApiName());
 			req.setKeyName("mrascratch");
 			req.setInstanceInitiatedShutdownBehavior("terminate");
@@ -310,7 +276,7 @@ public class SimpleMapReduce {
 		out.put(ConfigKey.SHUFFLE_BUCKET, prefixedName(prefix, "shuffle"));
 		out.put(ConfigKey.REDUCE_OUTPUTS_BUCKET, prefixedName(prefix, "reduceoutputs"));
 
-		out.put(ConfigKey.MAP_READER, AsciiTSVReader.class);
+		out.put(ConfigKey.MAP_READER, "com.xoba.smr.JSonKVReader");
 		out.put(ConfigKey.IS_INPUT_COMPRESSED, true);
 		out.put(ConfigKey.MAP_INPUTS_BUCKET, inputBucket);
 
@@ -318,7 +284,8 @@ public class SimpleMapReduce {
 		out.put(ConfigKey.SHUFFLEREADER, AsciiTSVReader.class);
 		out.put(ConfigKey.REDUCEWRITER, AsciiTSVWriter.class);
 
-		out.put(ConfigKey.RUNNABLE_JARFILE_URI, new URI("http://bogus.com/smr.jar"));
+		out.put(ConfigKey.RUNNABLE_JARFILE_URI, new URI("http://bogus.com"));
+		out.put(ConfigKey.CLASSPATH_JAR, new URI("file:///tmp/bogus.jar"));
 
 		Properties properties = new Properties();
 

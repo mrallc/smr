@@ -70,8 +70,8 @@ public class SMRDriver {
 		URI jar = c.containsKey(ConfigKey.CLASSPATH_JAR.toString()) ? new URI(c.getProperty(ConfigKey.CLASSPATH_JAR
 				.toString())) : null;
 
-		ClassLoader cl = jar == null ? Thread.currentThread().getContextClassLoader() : new URLClassLoader(
-				new URL[] { jar.toURL() });
+		ClassLoader cl = (jar == null ? Thread.currentThread().getContextClassLoader() : new URLClassLoader(
+				new URL[] { jar.toURL() }));
 
 		final String dom = c.getProperty(ConfigKey.SIMPLEDB_DOM.toString());
 		final String mapQueue = c.getProperty(ConfigKey.MAP_QUEUE.toString());
@@ -181,7 +181,7 @@ public class SMRDriver {
 		throw new IllegalArgumentException(u.toString());
 	}
 
-	public static void runMapper(IKeyValueReader reader, final IKeyValueWriter writer, AWSCredentials aws,
+	public static void runMapper(final IKeyValueReader reader, final IKeyValueWriter writer, AWSCredentials aws,
 			final String dom, final String mapInput, final IMapper mapper, final boolean isInputCompressed)
 			throws Exception {
 
@@ -217,64 +217,79 @@ public class SMRDriver {
 							URI in = new URI(p.getProperty("input"));
 							URI out = new URI(p.getProperty("output"));
 
-							File split = File.createTempFile("split", ".raw");
-							try {
+							final long hashes = new Long(p.getProperty("hashes"));
 
-								final long hashes = new Long(p.getProperty("hashes"));
+							logger.debugf("processing %s: %s to %s", p, in, out);
 
-								logger.debugf("processing %s: %s to %s", p, in, out);
+							final Map<String, File> files = new HashMap<String, File>();
+							final Map<String, OutputStream> writers = new HashMap<String, OutputStream>();
 
-								final Map<String, File> files = new HashMap<String, File>();
-								final Map<String, OutputStream> writers = new HashMap<String, OutputStream>();
+							final String bucket = extractBucket(in);
 
-								s3.getObject(new GetObjectRequest(extractBucket(in), extractKey(in)), split);
+							AWSUtils.scanObjectsInBucket(s3, bucket, extractKey(in), new IBucketListener() {
 
-								reader.readFully(isInputCompressed ? createDecompressingInput(split)
-										: createInput(split), new ICollector() {
-									@Override
-									public void collect(byte[] key, byte[] value) throws Exception {
+								@Override
+								public boolean add(S3ObjectSummary s) throws Exception {
 
-										mapper.map(key, value, new ICollector() {
+									File split = File.createTempFile("split", ".raw");
+									try {
+										s3.getObject(new GetObjectRequest(bucket, s.getKey()), split);
 
+										reader.readFully(isInputCompressed ? createDecompressingInput(split)
+												: createInput(split), new ICollector() {
 											@Override
 											public void collect(byte[] key, byte[] value) throws Exception {
 
-												final String hash = SimpleMapReduce.hash(key, hashes);
+												mapper.map(key, value, new ICollector() {
 
-												if (!files.containsKey(hash)) {
-													File tmp = File.createTempFile("output", ".gz");
-													OutputStream pw = new BufferedOutputStream(
-															createCompressingOutput(tmp));
-													files.put(hash, tmp);
-													writers.put(hash, pw);
-												}
+													@Override
+													public void collect(byte[] key, byte[] value) throws Exception {
 
-												OutputStream pw = writers.get(hash);
-												writer.write(pw, key, value);
+														final String hash = SimpleMapReduce.hash(key, hashes);
+
+														if (!files.containsKey(hash)) {
+															File tmp = File.createTempFile("output", ".gz");
+															OutputStream pw = new BufferedOutputStream(
+																	createCompressingOutput(tmp));
+															files.put(hash, tmp);
+															writers.put(hash, pw);
+														}
+
+														OutputStream pw = writers.get(hash);
+														writer.write(pw, key, value);
+													}
+												});
+
 											}
 										});
-
+									} finally {
+										split.delete();
 									}
-								});
 
-								for (OutputStream pw : writers.values()) {
-									pw.close();
+									return true;
 								}
 
-								for (String h : files.keySet()) {
-									File f = files.get(h);
-									String key = h + "/" + extractKey(in);
-									s3.putObject(extractBucket(out), key, f);
-									f.delete();
+								@Override
+								public void done() {
+
 								}
 
-								SimpleDbCommitter.commitNewAttribute(db, dom, in.toString(), "mapped", "1");
+							});
 
-								sqs.deleteMessage(new DeleteMessageRequest(mapInput, m.getReceiptHandle()));
-
-							} finally {
-								split.delete();
+							for (OutputStream pw : writers.values()) {
+								pw.close();
 							}
+
+							for (String h : files.keySet()) {
+								File f = files.get(h);
+								String key = h + "/" + extractKey(in);
+								s3.putObject(extractBucket(out), key, f);
+								f.delete();
+							}
+
+							SimpleDbCommitter.commitNewAttribute(db, dom, in.toString(), "mapped", "1");
+
+							sqs.deleteMessage(new DeleteMessageRequest(mapInput, m.getReceiptHandle()));
 
 						} finally {
 							keepAlive.cancel(false);
