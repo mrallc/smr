@@ -47,8 +47,8 @@ import com.amazonaws.services.sqs.model.SendMessageRequest;
 import com.xoba.amazonaws.AWSUtils;
 import com.xoba.smr.impl.AsciiTSVReader;
 import com.xoba.smr.impl.AsciiTSVWriter;
-import com.xoba.smr.impl.ValuePrefixCountingMapper;
-import com.xoba.smr.impl.ValueSummingReducer;
+import com.xoba.smr.impl.IdentityMapper;
+import com.xoba.smr.impl.IdentityReducer;
 import com.xoba.util.ILogger;
 import com.xoba.util.LogFactory;
 import com.xoba.util.MraUtils;
@@ -63,7 +63,7 @@ public class SimpleMapReduce {
 
 		logger.debugf("test sequence = %d", testSequence);
 
-		final int hashCardinality = 3;
+		final int hashCardinality = 10;
 		final int machineCount = 1;
 
 		AWSCredentials aws = createCreds();
@@ -71,7 +71,7 @@ public class SimpleMapReduce {
 		final String uniquePrefix = "smr-" + MraUtils.md5Hash(aws.getAWSAccessKeyId()).substring(0, 8) + "-"
 				+ testSequence;
 
-		final String inputBucket = "...";
+		final String inputBucket = null; // put your input bucket here
 
 		AmazonSimpleDB db = new AmazonSimpleDBClient(aws);
 		AmazonSQS sqs = new AmazonSQSClient(aws);
@@ -90,9 +90,18 @@ public class SimpleMapReduce {
 		List<String> inputSplitPrefixes = new LinkedList<String>();
 
 		{
-			// add key prefixes to inputSplitPrefixes here...
-		}
 
+			// put your own prefixes here
+
+			inputSplitPrefixes.add("aaab");
+			inputSplitPrefixes.add("aaac");
+			inputSplitPrefixes.add("aaad");
+			inputSplitPrefixes.add("aaae");
+			inputSplitPrefixes.add("aaaf");
+			inputSplitPrefixes.add("aaag");
+			inputSplitPrefixes.add("aaah");
+
+		}
 		logger.debugf("using %,d key prefixes", inputSplitPrefixes.size());
 
 		final long inputSplitCount = inputSplitPrefixes.size();
@@ -265,8 +274,8 @@ public class SimpleMapReduce {
 		out.put(ConfigKey.AWS_KEYID, aws.getAWSAccessKeyId());
 		out.put(ConfigKey.AWS_SECRETKEY, aws.getAWSSecretKey());
 
-		out.put(ConfigKey.MAPPER, ValuePrefixCountingMapper.class);
-		out.put(ConfigKey.REDUCER, ValueSummingReducer.class);
+		out.put(ConfigKey.MAPPER, IdentityMapper.class);
+		out.put(ConfigKey.REDUCER, IdentityReducer.class);
 
 		out.put(ConfigKey.MAP_QUEUE, sqs.createQueue(new CreateQueueRequest(prefixedName(prefix, "map"))).getQueueUrl());
 		out.put(ConfigKey.REDUCE_QUEUE, sqs.createQueue(new CreateQueueRequest(prefixedName(prefix, "reduce")))
@@ -285,7 +294,7 @@ public class SimpleMapReduce {
 		out.put(ConfigKey.REDUCEWRITER, AsciiTSVWriter.class);
 
 		out.put(ConfigKey.RUNNABLE_JARFILE_URI, new URI("http://bogus.com"));
-		out.put(ConfigKey.CLASSPATH_JAR, new URI("file:///tmp/bogus.jar"));
+		out.put(ConfigKey.CLASSPATH_JAR, new URI("file:///tmp/scan.jar"));
 
 		Properties properties = new Properties();
 
@@ -384,6 +393,9 @@ public class SimpleMapReduce {
 
 	private static String fmt(long x, long mod) {
 		long places = Math.round(Math.ceil(Math.log10(mod)));
+		if (places == 0) {
+			places = 1;
+		}
 		return new Formatter().format("%0" + places + "d", x).toString();
 	}
 

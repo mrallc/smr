@@ -224,6 +224,13 @@ public class SMRDriver {
 							final Map<String, File> files = new HashMap<String, File>();
 							final Map<String, OutputStream> writers = new HashMap<String, OutputStream>();
 
+							for (String hash : SimpleMapReduce.getAllHashes(hashes)) {
+								File tmp = File.createTempFile("output", ".gz");
+								OutputStream pw = new BufferedOutputStream(createCompressingOutput(tmp));
+								files.put(hash, tmp);
+								writers.put(hash, pw);
+							}
+
 							final String bucket = extractBucket(in);
 
 							AWSUtils.scanObjectsInBucket(s3, bucket, extractKey(in), new IBucketListener() {
@@ -246,14 +253,6 @@ public class SMRDriver {
 													public void collect(byte[] key, byte[] value) throws Exception {
 
 														final String hash = SimpleMapReduce.hash(key, hashes);
-
-														if (!files.containsKey(hash)) {
-															File tmp = File.createTempFile("output", ".gz");
-															OutputStream pw = new BufferedOutputStream(
-																	createCompressingOutput(tmp));
-															files.put(hash, tmp);
-															writers.put(hash, pw);
-														}
 
 														OutputStream pw = writers.get(hash);
 														writer.write(pw, key, value);
