@@ -48,10 +48,8 @@ import com.amazonaws.services.sqs.model.DeleteQueueRequest;
 import com.amazonaws.services.sqs.model.SendMessageRequest;
 import com.xoba.amazonaws.AWSUtils;
 import com.xoba.amazonaws.AWSUtils.IBucketListener;
-import com.xoba.smr.impl.ArxivTarReader;
 import com.xoba.smr.impl.AsciiTSVReader;
 import com.xoba.smr.impl.AsciiTSVWriter;
-import com.xoba.smr.impl.IdentityMapper;
 import com.xoba.smr.impl.ValuePrefixCountingMapper;
 import com.xoba.smr.impl.ValueSummingReducer;
 import com.xoba.util.ILogger;
@@ -65,25 +63,27 @@ public class SimpleMapReduce {
 
 	public static void main(String[] args) throws Exception {
 
+		final long testSequence = System.currentTimeMillis() % 10000;
+
+		logger.debugf("test sequence = %d", testSequence);
+
+		final int hashCardinality = 3;
+
 		AWSCredentials aws = createCreds();
 
-		final String uniquePrefix = MraUtils.md5Hash(aws.getAWSAccessKeyId()).substring(0, 8);
+		final String uniquePrefix = "smr-" + MraUtils.md5Hash(aws.getAWSAccessKeyId()).substring(0, 8) + "-"
+				+ testSequence;
 
-		if (args.length > 0) {
-			// generate some test data
-			populateTestBucket(new Integer(args[0]), uniquePrefix + "testinputs");
-		}
+		final String testInputBucket = prefixedName(uniquePrefix, "mapinputs");
+
+		populateTestBucket(5, testInputBucket);
 
 		AmazonS3 s3 = getS3(aws);
 
 		AmazonSimpleDB db = new AmazonSimpleDBClient(aws);
 		AmazonSQS sqs = new AmazonSQSClient(aws);
 
-		int x = 80; // testing sequence
-
-		final int hashes = 100; // cardinality of hash function
-
-		Properties config = createIdempotentContext(aws, "smr" + uniquePrefix + x);
+		Properties config = createIdempotentContext(aws, uniquePrefix, testInputBucket);
 
 		final String mapQueue = config.getProperty(ConfigKey.MAP_QUEUE.toString());
 		final String reduceQueue = config.getProperty(ConfigKey.REDUCE_QUEUE.toString());
@@ -109,9 +109,7 @@ public class SimpleMapReduce {
 				@Override
 				public boolean add(S3ObjectSummary s) {
 					String key = s.getKey();
-					if (key.endsWith(".tar")) {
-						keyMap.put(key, s.getSize());
-					}
+					keyMap.put(key, s.getSize());
 					return true;
 				}
 			});
@@ -137,22 +135,22 @@ public class SimpleMapReduce {
 			Properties p = new Properties();
 			p.setProperty("input", "s3://" + mapInputBucket + "/" + key);
 			p.setProperty("output", "s3://" + shuffleBucket);
-			p.setProperty("hashes", "" + hashes);
+			p.setProperty("hashes", "" + hashCardinality);
 			sqs.sendMessage(new SendMessageRequest(mapQueue, serialize(p)));
 		}
 
 		SimpleDbCommitter.commitNewAttribute(db, dom, "parameters", "splits", "" + inputSplits);
-		SimpleDbCommitter.commitNewAttribute(db, dom, "parameters", "hashes", "" + hashes);
+		SimpleDbCommitter.commitNewAttribute(db, dom, "parameters", "hashes", "" + hashCardinality);
 		SimpleDbCommitter.commitNewAttribute(db, dom, "parameters", "done", "1");
 
-		for (String hash : getAllHashes(hashes)) {
+		for (String hash : getAllHashes(hashCardinality)) {
 			Properties p = new Properties();
 			p.setProperty("input", "s3://" + shuffleBucket + "/" + hash);
 			p.setProperty("output", "s3://" + reduceOutputBucket);
 			sqs.sendMessage(new SendMessageRequest(reduceQueue, serialize(p)));
 		}
 
-		if (false) {
+		if (true) {
 			// run locally
 			SMRDriver.main(new String[] { MraUtils.convertToHex(serialize(config).getBytes()) });
 		} else {
@@ -247,6 +245,8 @@ public class SimpleMapReduce {
 
 		AmazonS3 s3 = getS3(aws);
 
+		s3.createBucket(bucket);
+
 		for (int i = 0; i < n; i++) {
 			logger.debugf("input %,d", i);
 			File tmp = File.createTempFile("data", ".gz");
@@ -254,7 +254,7 @@ public class SimpleMapReduce {
 
 				PrintWriter pw = new PrintWriter(new OutputStreamWriter(SMRDriver.createCompressingOutput(tmp)));
 				try {
-					for (int j = 0; j < 1000000; j++) {
+					for (int j = 0; j < 10000; j++) {
 						pw.printf("%d\t%s", j, UUID.randomUUID());
 						pw.println();
 					}
@@ -270,8 +270,6 @@ public class SimpleMapReduce {
 				tmp.delete();
 			}
 		}
-
-		System.exit(0);
 
 	}
 
@@ -289,7 +287,8 @@ public class SimpleMapReduce {
 	/**
 	 * creates configuration which drives the whole mapreduce process
 	 */
-	public static Properties createIdempotentContext(AWSCredentials aws, String prefix) throws Exception {
+	public static Properties createIdempotentContext(AWSCredentials aws, String prefix, String inputBucket)
+			throws Exception {
 
 		AmazonS3 s3 = getS3(aws);
 		AmazonSimpleDB db = new AmazonSimpleDBClient(aws);
@@ -300,60 +299,62 @@ public class SimpleMapReduce {
 		out.put(ConfigKey.AWS_KEYID, aws.getAWSAccessKeyId());
 		out.put(ConfigKey.AWS_SECRETKEY, aws.getAWSSecretKey());
 
+		out.put(ConfigKey.MAPPER, ValuePrefixCountingMapper.class);
+		out.put(ConfigKey.REDUCER, ValueSummingReducer.class);
+
 		out.put(ConfigKey.MAP_QUEUE, sqs.createQueue(new CreateQueueRequest(prefixedName(prefix, "map"))).getQueueUrl());
 		out.put(ConfigKey.REDUCE_QUEUE, sqs.createQueue(new CreateQueueRequest(prefixedName(prefix, "reduce")))
 				.getQueueUrl());
 
-		out.put(ConfigKey.SIMPLEDB_DOM, prefixedName(prefix, "commits"));
+		out.put(ConfigKey.SIMPLEDB_DOM, prefixedName(prefix, "commits").replaceAll("-", ""));
 		out.put(ConfigKey.SHUFFLE_BUCKET, prefixedName(prefix, "shuffle"));
 		out.put(ConfigKey.REDUCE_OUTPUTS_BUCKET, prefixedName(prefix, "reduceoutputs"));
 
-		if (true) {
-			out.put(ConfigKey.MAP_READER, ArxivTarReader.class);
-			out.put(ConfigKey.IS_INPUT_COMPRESSED, false);
-			out.put(ConfigKey.MAPPER, IdentityMapper.class);
-			out.put(ConfigKey.MAP_INPUTS_BUCKET, "arxiv");
-		} else {
-			out.put(ConfigKey.MAP_READER, AsciiTSVReader.class);
-			out.put(ConfigKey.IS_INPUT_COMPRESSED, true);
-			out.put(ConfigKey.MAPPER, ValuePrefixCountingMapper.class);
-			out.put(ConfigKey.MAP_INPUTS_BUCKET, prefixedName(prefix, "smrtestinputs"));
-		}
+		out.put(ConfigKey.MAP_READER, AsciiTSVReader.class);
+		out.put(ConfigKey.IS_INPUT_COMPRESSED, true);
+		out.put(ConfigKey.MAP_INPUTS_BUCKET, inputBucket);
 
 		out.put(ConfigKey.SHUFFLEWRITER, AsciiTSVWriter.class);
 		out.put(ConfigKey.SHUFFLEREADER, AsciiTSVReader.class);
 		out.put(ConfigKey.REDUCEWRITER, AsciiTSVWriter.class);
 
-		out.put(ConfigKey.REDUCER, ValueSummingReducer.class);
-
 		out.put(ConfigKey.RUNNABLE_JARFILE_URI, new URI("http://bogus.com/smr.jar"));
 
-		Properties out2 = new Properties();
+		Properties properties = new Properties();
 
 		for (ConfigKey c : out.keySet()) {
 			Object o = out.get(c);
 			if (o instanceof String || o instanceof URI || o instanceof Boolean) {
-				out2.put(c.toString(), o.toString());
+				properties.put(c.toString(), o.toString());
 			} else if (o instanceof Class) {
 				Class<?> x = (Class<?>) o;
-				out2.put(c.toString(), x.getName());
+				properties.put(c.toString(), x.getName());
 			} else {
 				throw new IllegalStateException();
 			}
 		}
 
-		db.createDomain(new CreateDomainRequest(out2.getProperty(ConfigKey.SIMPLEDB_DOM.toString())));
+		db.createDomain(new CreateDomainRequest(properties.getProperty(ConfigKey.SIMPLEDB_DOM.toString())));
 
 		try {
-			s3.createBucket(out2.getProperty(ConfigKey.MAP_INPUTS_BUCKET.toString()));
+			s3.createBucket(properties.getProperty(ConfigKey.MAP_INPUTS_BUCKET.toString()));
 		} catch (Exception e) {
 			logger.warnf("can't create map input bucket: %s", e);
 		}
 
-		s3.createBucket(out2.getProperty(ConfigKey.SHUFFLE_BUCKET.toString()));
-		s3.createBucket(out2.getProperty(ConfigKey.REDUCE_OUTPUTS_BUCKET.toString()));
+		s3.createBucket(properties.getProperty(ConfigKey.SHUFFLE_BUCKET.toString()));
+		s3.createBucket(properties.getProperty(ConfigKey.REDUCE_OUTPUTS_BUCKET.toString()));
 
-		return out2;
+		Set<String> keys = new TreeSet<String>();
+		for (Object o : properties.keySet()) {
+			keys.add(o.toString());
+		}
+
+		for (String o : keys) {
+			logger.debugf("config %s = %s", o, properties.get(o));
+		}
+
+		return properties;
 	}
 
 	@SuppressWarnings("unchecked")
@@ -364,7 +365,7 @@ public class SimpleMapReduce {
 	}
 
 	public static String prefixedName(String p, String n) {
-		return p + n;
+		return p + "-" + n;
 	}
 
 	@SuppressWarnings("unused")
