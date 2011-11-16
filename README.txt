@@ -12,6 +12,6 @@ instructions:
 4. import existing projects into eclipse from the smr top-level
 directory
 
-5. inspect then run class com.xoba.smr.SimpleMapReduce:
+5. inspect & then run method "launch" in class com.xoba.smr.SimpleMapReduce:
 
 https://github.com/mrallc/smr/blob/master/code/src/com/xoba/smr/SimpleMapReduce.java
