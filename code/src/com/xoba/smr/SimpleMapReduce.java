@@ -4,7 +4,6 @@ import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileReader;
 import java.io.IOException;
-import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
 import java.io.StringReader;
 import java.io.StringWriter;
@@ -19,7 +18,6 @@ import java.util.Properties;
 import java.util.Set;
 import java.util.SortedSet;
 import java.util.TreeSet;
-import java.util.UUID;
 
 import org.apache.commons.codec.binary.Base64;
 
@@ -47,8 +45,9 @@ import com.amazonaws.services.sqs.model.SendMessageRequest;
 import com.xoba.amazonaws.AWSUtils;
 import com.xoba.smr.impl.AsciiTSVReader;
 import com.xoba.smr.impl.AsciiTSVWriter;
-import com.xoba.smr.impl.IdentityMapper;
-import com.xoba.smr.impl.IdentityReducer;
+import com.xoba.smr.impl.KeyPrefixMapper;
+import com.xoba.smr.impl.StringsKVComparator;
+import com.xoba.smr.impl.ValueSummingReducer;
 import com.xoba.util.ILogger;
 import com.xoba.util.LogFactory;
 import com.xoba.util.MraUtils;
@@ -57,13 +56,14 @@ public class SimpleMapReduce {
 
 	private static final ILogger logger = LogFactory.getDefault().create();
 
-	public static void main(String[] args) throws Exception {
+	public static void debugTestingLaunch(String inputBucket, String outputBucket, String snsDone,
+			List<String> inputSplitPrefixes) throws Exception {
 
 		final long testSequence = System.currentTimeMillis() % 10000;
 
 		logger.debugf("test sequence = %d", testSequence);
 
-		final int hashCardinality = 10;
+		final int hashCardinality0 = 3;
 		final int machineCount = 1;
 
 		AWSCredentials aws = createCreds();
@@ -71,12 +71,20 @@ public class SimpleMapReduce {
 		final String uniquePrefix = "smr-" + MraUtils.md5Hash(aws.getAWSAccessKeyId()).substring(0, 8) + "-"
 				+ testSequence;
 
-		final String inputBucket = null; // put your input bucket here
+		Properties config = createDebugTestingContext(aws, uniquePrefix, inputBucket, outputBucket, hashCardinality0,
+				snsDone);
+
+		launch(config, inputSplitPrefixes, machineCount);
+
+	}
+
+	public static void launch(Properties config, List<String> inputSplitPrefixes, int machineCount) throws Exception {
+
+		AWSCredentials aws = create(config);
 
 		AmazonSimpleDB db = new AmazonSimpleDBClient(aws);
 		AmazonSQS sqs = new AmazonSQSClient(aws);
-
-		Properties config = createIdempotentContext(aws, uniquePrefix, inputBucket);
+		AmazonS3 s3 = new AmazonS3Client(aws);
 
 		final String mapQueue = config.getProperty(ConfigKey.MAP_QUEUE.toString());
 		final String reduceQueue = config.getProperty(ConfigKey.REDUCE_QUEUE.toString());
@@ -87,21 +95,10 @@ public class SimpleMapReduce {
 		final String shuffleBucket = config.getProperty(ConfigKey.SHUFFLE_BUCKET.toString());
 		final String reduceOutputBucket = config.getProperty(ConfigKey.REDUCE_OUTPUTS_BUCKET.toString());
 
-		List<String> inputSplitPrefixes = new LinkedList<String>();
+		final int hashCard = new Integer(config.getProperty(ConfigKey.HASH_CARDINALITY.toString()));
 
-		{
+		s3.createBucket(reduceOutputBucket);
 
-			// put your own prefixes here
-
-			inputSplitPrefixes.add("aaab");
-			inputSplitPrefixes.add("aaac");
-			inputSplitPrefixes.add("aaad");
-			inputSplitPrefixes.add("aaae");
-			inputSplitPrefixes.add("aaaf");
-			inputSplitPrefixes.add("aaag");
-			inputSplitPrefixes.add("aaah");
-
-		}
 		logger.debugf("using %,d key prefixes", inputSplitPrefixes.size());
 
 		final long inputSplitCount = inputSplitPrefixes.size();
@@ -109,26 +106,26 @@ public class SimpleMapReduce {
 		for (String key : inputSplitPrefixes) {
 			Properties p = new Properties();
 			p.setProperty("input", "s3://" + mapInputBucket + "/" + key);
-			p.setProperty("output", "s3://" + shuffleBucket);
-			p.setProperty("hashes", "" + hashCardinality);
 			sqs.sendMessage(new SendMessageRequest(mapQueue, serialize(p)));
 		}
 
 		SimpleDbCommitter.commitNewAttribute(db, dom, "parameters", "splits", "" + inputSplitCount);
-		SimpleDbCommitter.commitNewAttribute(db, dom, "parameters", "hashes", "" + hashCardinality);
+		SimpleDbCommitter.commitNewAttribute(db, dom, "parameters", "hashes", "" + hashCard);
 		SimpleDbCommitter.commitNewAttribute(db, dom, "parameters", "done", "1");
 
-		for (String hash : getAllHashes(hashCardinality)) {
+		for (String hash : getAllHashes(hashCard)) {
 			Properties p = new Properties();
 			p.setProperty("input", "s3://" + shuffleBucket + "/" + hash);
-			p.setProperty("output", "s3://" + reduceOutputBucket);
 			sqs.sendMessage(new SendMessageRequest(reduceQueue, serialize(p)));
 		}
 
 		if (machineCount == 1) {
+
 			// run locally
 			SMRDriver.main(new String[] { MraUtils.convertToHex(serialize(config).getBytes()) });
+
 		} else if (machineCount > 1) {
+
 			// run in the cloud
 			AmazonEC2 ec2 = new AmazonEC2Client(aws);
 			AmazonInstance ai = AmazonInstance.M2_4XLARGE;
@@ -214,40 +211,6 @@ public class SimpleMapReduce {
 
 	}
 
-	private static void populateTestBucket(int n, String bucket) throws Exception {
-
-		AWSCredentials aws = createCreds();
-
-		AmazonS3 s3 = getS3(aws);
-
-		s3.createBucket(bucket);
-
-		for (int i = 0; i < n; i++) {
-			logger.debugf("input %,d", i);
-			File tmp = File.createTempFile("data", ".gz");
-			try {
-
-				PrintWriter pw = new PrintWriter(new OutputStreamWriter(SMRDriver.createCompressingOutput(tmp)));
-				try {
-					for (int j = 0; j < 10000; j++) {
-						pw.printf("%d\t%s", j, UUID.randomUUID());
-						pw.println();
-					}
-				} finally {
-					pw.close();
-				}
-
-				String key = "split-" + i + ".gz";
-
-				s3.putObject(bucket, key, tmp);
-
-			} finally {
-				tmp.delete();
-			}
-		}
-
-	}
-
 	public static AmazonS3 getS3(AWSCredentials aws) {
 		AmazonS3Client s3 = new AmazonS3Client(aws);
 		s3.addRequestHandler(new AbstractRequestHandler() {
@@ -262,8 +225,8 @@ public class SimpleMapReduce {
 	/**
 	 * creates configuration which drives the whole mapreduce process
 	 */
-	public static Properties createIdempotentContext(AWSCredentials aws, String prefix, String inputBucket)
-			throws Exception {
+	public static Properties createDebugTestingContext(AWSCredentials aws, String prefix, String inputBucket,
+			String outputBucket, int hashCardinality, String sns) throws Exception {
 
 		AmazonS3 s3 = getS3(aws);
 		AmazonSimpleDB db = new AmazonSimpleDBClient(aws);
@@ -271,11 +234,15 @@ public class SimpleMapReduce {
 
 		Map<ConfigKey, Object> out = new HashMap<ConfigKey, Object>();
 
+		out.put(ConfigKey.SNS_ARN, sns);
+
 		out.put(ConfigKey.AWS_KEYID, aws.getAWSAccessKeyId());
 		out.put(ConfigKey.AWS_SECRETKEY, aws.getAWSSecretKey());
 
-		out.put(ConfigKey.MAPPER, IdentityMapper.class);
-		out.put(ConfigKey.REDUCER, IdentityReducer.class);
+		out.put(ConfigKey.HASH_CARDINALITY, hashCardinality);
+
+		out.put(ConfigKey.MAPPER, KeyPrefixMapper.class);
+		out.put(ConfigKey.REDUCER, ValueSummingReducer.class);
 
 		out.put(ConfigKey.MAP_QUEUE, sqs.createQueue(new CreateQueueRequest(prefixedName(prefix, "map"))).getQueueUrl());
 		out.put(ConfigKey.REDUCE_QUEUE, sqs.createQueue(new CreateQueueRequest(prefixedName(prefix, "reduce")))
@@ -283,9 +250,12 @@ public class SimpleMapReduce {
 
 		out.put(ConfigKey.SIMPLEDB_DOM, prefixedName(prefix, "commits").replaceAll("-", ""));
 		out.put(ConfigKey.SHUFFLE_BUCKET, prefixedName(prefix, "shuffle"));
-		out.put(ConfigKey.REDUCE_OUTPUTS_BUCKET, prefixedName(prefix, "reduceoutputs"));
 
-		out.put(ConfigKey.MAP_READER, "com.xoba.smr.JSonKVReader");
+		out.put(ConfigKey.SHUFFLE_COMPARATOR, StringsKVComparator.class);
+
+		out.put(ConfigKey.REDUCE_OUTPUTS_BUCKET, outputBucket);
+
+		out.put(ConfigKey.MAP_READER, AsciiTSVReader.class);
 		out.put(ConfigKey.IS_INPUT_COMPRESSED, true);
 		out.put(ConfigKey.MAP_INPUTS_BUCKET, inputBucket);
 
@@ -293,14 +263,16 @@ public class SimpleMapReduce {
 		out.put(ConfigKey.SHUFFLEREADER, AsciiTSVReader.class);
 		out.put(ConfigKey.REDUCEWRITER, AsciiTSVWriter.class);
 
-		out.put(ConfigKey.RUNNABLE_JARFILE_URI, new URI("http://bogus.com"));
-		out.put(ConfigKey.CLASSPATH_JAR, new URI("file:///tmp/scan.jar"));
+		if (false) {
+			out.put(ConfigKey.RUNNABLE_JARFILE_URI, new URI("http://bogus.com"));
+			out.put(ConfigKey.CLASSPATH_JAR, new URI("file:///tmp/scan.jar"));
+		}
 
 		Properties properties = new Properties();
 
 		for (ConfigKey c : out.keySet()) {
 			Object o = out.get(c);
-			if (o instanceof String || o instanceof URI || o instanceof Boolean) {
+			if (o instanceof String || o instanceof URI || o instanceof Boolean || o instanceof Integer) {
 				properties.put(c.toString(), o.toString());
 			} else if (o instanceof Class) {
 				Class<?> x = (Class<?>) o;

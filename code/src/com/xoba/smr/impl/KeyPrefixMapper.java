@@ -1,11 +1,10 @@
 package com.xoba.smr.impl;
 
-import com.xoba.smr.inf.IMapper;
 import com.xoba.smr.inf.ICollector;
 
-public final class KeyPrefixMapper implements IMapper {
+public final class KeyPrefixMapper extends AbstractMapper {
 
-	private final int p = 3;
+	private final int p = 2;
 
 	@Override
 	public void map(byte[] key, byte[] value, ICollector output) throws Exception {
