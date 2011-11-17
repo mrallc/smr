@@ -40,31 +40,35 @@ public class MergeSort {
 
 		AWSCredentials aws = SimpleMapReduce.createCreds();
 
-		for (int j = 0; j < 10; j++) {
-			File in = new File("/tmp/in.txt.gz");
-			PrintWriter pw = new PrintWriter(new OutputStreamWriter(createOutput(in)));
-			for (int i = 0; i < 10000; i++) {
-				pw.printf("%s\t%d", UUID.randomUUID(), 1);
-				pw.println();
-			}
-			pw.close();
+		if (false) {
+			for (int j = 0; j < 10; j++) {
+				File in = new File("/tmp/in.txt.gz");
+				PrintWriter pw = new PrintWriter(new OutputStreamWriter(createOutput(in)));
+				for (int i = 0; i < 10000; i++) {
+					pw.printf("%s\t%d", UUID.randomUUID(), 1);
+					pw.println();
+				}
+				pw.close();
 
-			logger.debugf("putting %,d", j);
-			new AmazonS3Client(aws).putObject("smr-in", j + ".gz", in);
+				logger.debugf("putting %,d", j);
+				new AmazonS3Client(aws).putObject("smr-in", j + ".gz", in);
+			}
 		}
 
 		File in = new File("/tmp/in.txt.gz");
 		PrintWriter pw = new PrintWriter(new OutputStreamWriter(createOutput(in)));
-		for (int i = 0; i < 10000; i++) {
+		for (int i = 0; i < 1000000; i++) {
 			pw.printf("%s\t%d", UUID.randomUUID(), i);
 			pw.println();
 		}
 		pw.close();
 
+		logger.debugf("%,d bytes in %s", in.length(), in);
+
 		File out = new File("/tmp/out.txt.gz");
 
 		long start = System.currentTimeMillis();
-		mergeSort(100000000, in, out, new StringsKVComparator(), new AsciiTSVReader(), new AsciiTSVWriter());
+		mergeSort(10000000, in, out, new StringsKVComparator(), new AsciiTSVReader(), new AsciiTSVWriter());
 		logger.debugf("sorted in %,d millis", System.currentTimeMillis() - start);
 	}
 
@@ -76,9 +80,11 @@ public class MergeSort {
 	private static void mergeSort(long maxSortSize, File in, File out, IKeyValueComparator comp,
 			IKeyValueReader reader, final IKeyValueWriter writer, int level) throws Exception {
 
-		if (in.length() < 1000000) {
+		if (in.length() < maxSortSize) {
 			sort(in, out, comp, reader, writer);
 		} else {
+
+			logger.debugf("splitting %,d bytes...", in.length());
 
 			final CountingInputStream in0 = new CountingInputStream(new FileInputStream(in));
 
@@ -138,8 +144,8 @@ public class MergeSort {
 	private static void merge(File left, File right, File out, final IKeyValueComparator comp, IKeyValueReader reader,
 			IKeyValueWriter writer) throws Exception {
 
-		final BlockingQueue<QPair> lq = new LinkedBlockingQueue<QPair>();
-		final BlockingQueue<QPair> rq = new LinkedBlockingQueue<QPair>();
+		final BlockingQueue<QPair> lq = new LinkedBlockingQueue<QPair>(10);
+		final BlockingQueue<QPair> rq = new LinkedBlockingQueue<QPair>(10);
 
 		driveAsync(left, lq, reader);
 		driveAsync(right, rq, reader);
@@ -279,8 +285,6 @@ public class MergeSort {
 				} catch (Exception e) {
 					logger.warnf("got exception reading %s: %s", f, e);
 					q.add(wrap(e));
-				} finally {
-					logger.debugf("done driving %s", f);
 				}
 			}
 		}.start();
