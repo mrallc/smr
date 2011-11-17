@@ -29,12 +29,9 @@ import com.amazonaws.services.s3.AmazonS3;
 import com.amazonaws.services.s3.AmazonS3Client;
 import com.amazonaws.services.simpledb.AmazonSimpleDB;
 import com.amazonaws.services.simpledb.AmazonSimpleDBClient;
-import com.amazonaws.services.simpledb.model.DeleteDomainRequest;
 import com.amazonaws.services.sqs.AmazonSQS;
 import com.amazonaws.services.sqs.AmazonSQSClient;
-import com.amazonaws.services.sqs.model.DeleteQueueRequest;
 import com.amazonaws.services.sqs.model.SendMessageRequest;
-import com.xoba.amazonaws.AWSUtils;
 import com.xoba.util.ILogger;
 import com.xoba.util.LogFactory;
 import com.xoba.util.MraUtils;
@@ -194,24 +191,6 @@ public class SimpleMapReduce {
 
 	public static String prefixedName(String p, String n) {
 		return p + "-" + n;
-	}
-
-	@SuppressWarnings("unused")
-	private static void cleanup(Properties p) throws Exception {
-		AWSCredentials aws = create(p);
-		AmazonS3 s3 = getS3(aws);
-		AmazonSimpleDB db = new AmazonSimpleDBClient(aws);
-		AmazonSQS sqs = new AmazonSQSClient(aws);
-
-		db.deleteDomain(new DeleteDomainRequest(p.getProperty(ConfigKey.SIMPLEDB_DOM.toString())));
-
-		sqs.deleteQueue(new DeleteQueueRequest(p.getProperty(ConfigKey.MAP_QUEUE.toString())));
-		sqs.deleteQueue(new DeleteQueueRequest(p.getProperty(ConfigKey.REDUCE_QUEUE.toString())));
-
-		AWSUtils.deleteBucket(s3, p.getProperty(ConfigKey.MAP_INPUTS_BUCKET.toString()));
-
-		AWSUtils.deleteBucket(s3, p.getProperty(ConfigKey.SHUFFLE_BUCKET.toString()));
-		AWSUtils.deleteBucket(s3, p.getProperty(ConfigKey.REDUCE_OUTPUTS_BUCKET.toString()));
 	}
 
 	public static AWSCredentials create(final Properties p) {
