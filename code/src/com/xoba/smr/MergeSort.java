@@ -20,8 +20,6 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
 
-import com.amazonaws.auth.AWSCredentials;
-import com.amazonaws.services.s3.AmazonS3Client;
 import com.xoba.smr.impl.AsciiTSVReader;
 import com.xoba.smr.impl.AsciiTSVWriter;
 import com.xoba.smr.impl.StringsKVComparator;
@@ -37,23 +35,6 @@ public class MergeSort {
 	private static final ILogger logger = LogFactory.getDefault().create();
 
 	public static void main(String[] args) throws Exception {
-
-		AWSCredentials aws = SimpleMapReduce.createCreds();
-
-		if (false) {
-			for (int j = 0; j < 10; j++) {
-				File in = new File("/tmp/in.txt.gz");
-				PrintWriter pw = new PrintWriter(new OutputStreamWriter(createOutput(in)));
-				for (int i = 0; i < 10000; i++) {
-					pw.printf("%s\t%d", UUID.randomUUID(), 1);
-					pw.println();
-				}
-				pw.close();
-
-				logger.debugf("putting %,d", j);
-				new AmazonS3Client(aws).putObject("smr-in", j + ".gz", in);
-			}
-		}
 
 		File in = new File("/tmp/in.txt.gz");
 		PrintWriter pw = new PrintWriter(new OutputStreamWriter(createOutput(in)));

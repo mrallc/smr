@@ -29,11 +29,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
 
-import com.amazonaws.Request;
 import com.amazonaws.auth.AWSCredentials;
-import com.amazonaws.handlers.AbstractRequestHandler;
 import com.amazonaws.services.s3.AmazonS3;
-import com.amazonaws.services.s3.AmazonS3Client;
 import com.amazonaws.services.s3.model.GetObjectRequest;
 import com.amazonaws.services.s3.model.S3ObjectSummary;
 import com.amazonaws.services.simpledb.AmazonSimpleDB;
@@ -184,17 +181,6 @@ public class SMRDriver {
 
 	}
 
-	private static AmazonS3 getS3(AWSCredentials aws) {
-		AmazonS3Client s3 = new AmazonS3Client(aws);
-		s3.addRequestHandler(new AbstractRequestHandler() {
-			@Override
-			public void beforeRequest(Request<?> request) {
-				request.addHeader("x-amz-request-payer", "requester");
-			}
-		});
-		return s3;
-	}
-
 	public static String extractBucket(URI u) throws Exception {
 		if (u.getScheme().equals("s3")) {
 			if (u.isOpaque()) {
@@ -219,7 +205,7 @@ public class SMRDriver {
 			final String dom, final String mapInput, final IMapper mapper, final boolean isInputCompressed,
 			String shuffleBucket, final long hashes) throws Exception {
 
-		final AmazonS3 s3 = getS3(aws);
+		final AmazonS3 s3 = SimpleMapReduce.getS3(aws);
 		final AmazonSimpleDB db = new AmazonSimpleDBClient(aws);
 		final AmazonSQS sqs = new AmazonSQSClient(aws);
 
@@ -388,7 +374,7 @@ public class SMRDriver {
 			final String dom, final String reduceQueue, final IReducer reducer, String out, IKeyValueComparator comp)
 			throws Exception {
 
-		final AmazonS3 s3 = getS3(aws);
+		final AmazonS3 s3 = SimpleMapReduce.getS3(aws);
 		final AmazonSimpleDB db = new AmazonSimpleDBClient(aws);
 		final AmazonSQS sqs = new AmazonSQSClient(aws);
 

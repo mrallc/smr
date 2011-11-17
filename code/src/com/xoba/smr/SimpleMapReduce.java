@@ -1,19 +1,13 @@
 package com.xoba.smr;
 
-import java.io.BufferedReader;
-import java.io.File;
-import java.io.FileReader;
-import java.io.IOException;
 import java.io.PrintWriter;
 import java.io.StringReader;
 import java.io.StringWriter;
 import java.net.URI;
 import java.util.Formatter;
-import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
-import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
 import java.util.SortedSet;
@@ -35,19 +29,12 @@ import com.amazonaws.services.s3.AmazonS3;
 import com.amazonaws.services.s3.AmazonS3Client;
 import com.amazonaws.services.simpledb.AmazonSimpleDB;
 import com.amazonaws.services.simpledb.AmazonSimpleDBClient;
-import com.amazonaws.services.simpledb.model.CreateDomainRequest;
 import com.amazonaws.services.simpledb.model.DeleteDomainRequest;
 import com.amazonaws.services.sqs.AmazonSQS;
 import com.amazonaws.services.sqs.AmazonSQSClient;
-import com.amazonaws.services.sqs.model.CreateQueueRequest;
 import com.amazonaws.services.sqs.model.DeleteQueueRequest;
 import com.amazonaws.services.sqs.model.SendMessageRequest;
 import com.xoba.amazonaws.AWSUtils;
-import com.xoba.smr.impl.AsciiTSVReader;
-import com.xoba.smr.impl.AsciiTSVWriter;
-import com.xoba.smr.impl.KeyPrefixMapper;
-import com.xoba.smr.impl.StringsKVComparator;
-import com.xoba.smr.impl.ValueSummingReducer;
 import com.xoba.util.ILogger;
 import com.xoba.util.LogFactory;
 import com.xoba.util.MraUtils;
@@ -55,28 +42,6 @@ import com.xoba.util.MraUtils;
 public class SimpleMapReduce {
 
 	private static final ILogger logger = LogFactory.getDefault().create();
-
-	public static void debugTestingLaunch(String inputBucket, String outputBucket, String snsDone,
-			List<String> inputSplitPrefixes) throws Exception {
-
-		final long testSequence = System.currentTimeMillis() % 10000;
-
-		logger.debugf("test sequence = %d", testSequence);
-
-		final int hashCardinality0 = 3;
-		final int machineCount = 1;
-
-		AWSCredentials aws = createCreds();
-
-		final String uniquePrefix = "smr-" + MraUtils.md5Hash(aws.getAWSAccessKeyId()).substring(0, 8) + "-"
-				+ testSequence;
-
-		Properties config = createDebugTestingContext(aws, uniquePrefix, inputBucket, outputBucket, hashCardinality0,
-				snsDone);
-
-		launch(config, inputSplitPrefixes, machineCount);
-
-	}
 
 	public static void launch(Properties config, List<String> inputSplitPrefixes, int machineCount) throws Exception {
 
@@ -98,8 +63,6 @@ public class SimpleMapReduce {
 		final int hashCard = new Integer(config.getProperty(ConfigKey.HASH_CARDINALITY.toString()));
 
 		s3.createBucket(reduceOutputBucket);
-
-		logger.debugf("using %,d key prefixes", inputSplitPrefixes.size());
 
 		final long inputSplitCount = inputSplitPrefixes.size();
 
@@ -222,89 +185,6 @@ public class SimpleMapReduce {
 		return s3;
 	}
 
-	/**
-	 * creates configuration which drives the whole mapreduce process
-	 */
-	public static Properties createDebugTestingContext(AWSCredentials aws, String prefix, String inputBucket,
-			String outputBucket, int hashCardinality, String sns) throws Exception {
-
-		AmazonS3 s3 = getS3(aws);
-		AmazonSimpleDB db = new AmazonSimpleDBClient(aws);
-		AmazonSQS sqs = new AmazonSQSClient(aws);
-
-		Map<ConfigKey, Object> out = new HashMap<ConfigKey, Object>();
-
-		out.put(ConfigKey.SNS_ARN, sns);
-
-		out.put(ConfigKey.AWS_KEYID, aws.getAWSAccessKeyId());
-		out.put(ConfigKey.AWS_SECRETKEY, aws.getAWSSecretKey());
-
-		out.put(ConfigKey.HASH_CARDINALITY, hashCardinality);
-
-		out.put(ConfigKey.MAPPER, KeyPrefixMapper.class);
-		out.put(ConfigKey.REDUCER, ValueSummingReducer.class);
-
-		out.put(ConfigKey.MAP_QUEUE, sqs.createQueue(new CreateQueueRequest(prefixedName(prefix, "map"))).getQueueUrl());
-		out.put(ConfigKey.REDUCE_QUEUE, sqs.createQueue(new CreateQueueRequest(prefixedName(prefix, "reduce")))
-				.getQueueUrl());
-
-		out.put(ConfigKey.SIMPLEDB_DOM, prefixedName(prefix, "commits").replaceAll("-", ""));
-		out.put(ConfigKey.SHUFFLE_BUCKET, prefixedName(prefix, "shuffle"));
-
-		out.put(ConfigKey.SHUFFLE_COMPARATOR, StringsKVComparator.class);
-
-		out.put(ConfigKey.REDUCE_OUTPUTS_BUCKET, outputBucket);
-
-		out.put(ConfigKey.MAP_READER, AsciiTSVReader.class);
-		out.put(ConfigKey.IS_INPUT_COMPRESSED, true);
-		out.put(ConfigKey.MAP_INPUTS_BUCKET, inputBucket);
-
-		out.put(ConfigKey.SHUFFLEWRITER, AsciiTSVWriter.class);
-		out.put(ConfigKey.SHUFFLEREADER, AsciiTSVReader.class);
-		out.put(ConfigKey.REDUCEWRITER, AsciiTSVWriter.class);
-
-		if (false) {
-			out.put(ConfigKey.RUNNABLE_JARFILE_URI, new URI("http://bogus.com"));
-			out.put(ConfigKey.CLASSPATH_JAR, new URI("file:///tmp/scan.jar"));
-		}
-
-		Properties properties = new Properties();
-
-		for (ConfigKey c : out.keySet()) {
-			Object o = out.get(c);
-			if (o instanceof String || o instanceof URI || o instanceof Boolean || o instanceof Integer) {
-				properties.put(c.toString(), o.toString());
-			} else if (o instanceof Class) {
-				Class<?> x = (Class<?>) o;
-				properties.put(c.toString(), x.getName());
-			} else {
-				throw new IllegalStateException();
-			}
-		}
-
-		db.createDomain(new CreateDomainRequest(properties.getProperty(ConfigKey.SIMPLEDB_DOM.toString())));
-
-		try {
-			s3.createBucket(properties.getProperty(ConfigKey.MAP_INPUTS_BUCKET.toString()));
-		} catch (Exception e) {
-			logger.warnf("can't create map input bucket: %s", e);
-		}
-
-		s3.createBucket(properties.getProperty(ConfigKey.SHUFFLE_BUCKET.toString()));
-		s3.createBucket(properties.getProperty(ConfigKey.REDUCE_OUTPUTS_BUCKET.toString()));
-
-		Set<String> keys = new TreeSet<String>();
-		for (Object o : properties.keySet()) {
-			keys.add(o.toString());
-		}
-
-		for (String o : keys) {
-			logger.debugf("config %s = %s", o, properties.get(o));
-		}
-
-		return properties;
-	}
-
 	@SuppressWarnings("unchecked")
 	public static <T> T load(ClassLoader cl, Properties p, ConfigKey c, Class<T> x) throws Exception {
 		T y = (T) cl.loadClass(p.getProperty(c.toString())).newInstance();
@@ -369,37 +249,6 @@ public class SimpleMapReduce {
 			places = 1;
 		}
 		return new Formatter().format("%0" + places + "d", x).toString();
-	}
-
-	private static AWSCredentials CACHED_AWS_CREDENTIALS = null;
-
-	public static synchronized AWSCredentials createCreds() throws IOException {
-
-		if (CACHED_AWS_CREDENTIALS == null) {
-			File aws = new File(System.getProperty("user.home") + "/.awssecret");
-
-			BufferedReader reader = new BufferedReader(new FileReader(aws));
-
-			final String accessKeyID = reader.readLine();
-			final String secretKey = reader.readLine();
-
-			logger.debugf("using aws credentials %s and %s", accessKeyID, secretKey);
-
-			CACHED_AWS_CREDENTIALS = new AWSCredentials() {
-
-				@Override
-				public String getAWSAccessKeyId() {
-					return accessKeyID;
-				}
-
-				@Override
-				public String getAWSSecretKey() {
-					return secretKey;
-				}
-			};
-		}
-
-		return CACHED_AWS_CREDENTIALS;
 	}
 
 	public static String serialize(Properties p) throws Exception {
