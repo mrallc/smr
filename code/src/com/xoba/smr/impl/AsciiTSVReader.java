@@ -12,6 +12,7 @@ public class AsciiTSVReader implements IKeyValueReader {
 
 	@Override
 	public void readFully(InputStream in, ICollector out) throws Exception {
+		final byte[] empty = new byte[0];
 		BufferedReader reader = new BufferedReader(new InputStreamReader(new BufferedInputStream(in)));
 		try {
 			boolean done = false;
@@ -21,12 +22,21 @@ public class AsciiTSVReader implements IKeyValueReader {
 					done = true;
 				} else {
 					String[] kv = line.split("\t");
-					out.collect(kv[0].getBytes("US-ASCII"), kv[1].getBytes("US-ASCII"));
+					switch (kv.length) {
+					case 0:
+						out.collect(empty, empty);
+						break;
+					case 1:
+						out.collect(kv[0].getBytes("US-ASCII"), empty);
+						break;
+					default:
+						out.collect(kv[0].getBytes("US-ASCII"), kv[1].getBytes("US-ASCII"));
+						break;
+					}
 				}
 			}
 		} finally {
 			reader.close();
 		}
 	}
-
 }

@@ -146,9 +146,11 @@ public class SMRDriver {
 
 						if (countCommitted(aws, dom, "sns") < 1) {
 							AmazonSimpleDB db = new AmazonSimpleDBClient(aws);
-							String arn = c.getProperty(ConfigKey.SNS_ARN.toString());
-							AmazonSNS sns = new AmazonSNSClient(aws);
-							sns.publish(new PublishRequest(arn, "done"));
+							if (c.containsKey(ConfigKey.SNS_ARN.toString())) {
+								String arn = c.getProperty(ConfigKey.SNS_ARN.toString());
+								AmazonSNS sns = new AmazonSNSClient(aws);
+								sns.publish(new PublishRequest(arn, "done"));
+							}
 							SimpleDbCommitter.commitNewAttribute(db, dom, "notifications", "sns", "1");
 						}
 
