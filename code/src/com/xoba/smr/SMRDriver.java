@@ -288,23 +288,18 @@ public class SMRDriver {
 											});
 										}
 
+										final ICollector c = new ICollector() {
+											@Override
+											public void collect(byte[] key, byte[] value) throws Exception {
+												writer.write(writers.get(SimpleMapReduce.hash(key, hashes)), key, value);
+											}
+										};
+
 										reader.readFully(isInputCompressed ? createDecompressingInput(split)
 												: createInput(split), new ICollector() {
 											@Override
 											public void collect(byte[] key, byte[] value) throws Exception {
-
-												mapper.map(key, value, new ICollector() {
-
-													@Override
-													public void collect(byte[] key, byte[] value) throws Exception {
-
-														final String hash = SimpleMapReduce.hash(key, hashes);
-
-														OutputStream pw = writers.get(hash);
-														writer.write(pw, key, value);
-													}
-												});
-
+												mapper.map(key, value, c);
 											}
 										});
 									} finally {
