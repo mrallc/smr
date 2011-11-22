@@ -5,6 +5,7 @@ import java.io.BufferedOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.URI;
@@ -99,11 +100,14 @@ public class SMRDriver {
 		final String reduceOut = c.getProperty(ConfigKey.REDUCE_OUTPUTS_BUCKET.toString());
 		final long hashes = new Long(c.getProperty(ConfigKey.HASH_CARDINALITY.toString()));
 
-		int n = Runtime.getRuntime().availableProcessors();
+		int threadCount = c.containsKey(ConfigKey.THREADS_PER_MACHINE.toString()) ? new Integer(
+				c.getProperty(ConfigKey.THREADS_PER_MACHINE.toString())) : Runtime.getRuntime().availableProcessors();
+
+		logger.debugf("threadcount = %,d", threadCount);
 
 		List<Thread> threads = new LinkedList<Thread>();
 
-		for (int i = 0; i < n; i++) {
+		for (int i = 0; i < threadCount; i++) {
 
 			Thread t = new Thread() {
 				@Override
@@ -244,7 +248,7 @@ public class SMRDriver {
 							final Map<String, OutputStream> writers = new HashMap<String, OutputStream>();
 
 							for (String hash : SimpleMapReduce.getAllHashes(hashes)) {
-								File tmp = File.createTempFile("output", ".gz");
+								File tmp = createTempFile("mapper hash output " + hash, "output", ".gz");
 								OutputStream pw = new BufferedOutputStream(createCompressingOutput(tmp));
 								files.put(hash, tmp);
 								writers.put(hash, pw);
@@ -260,7 +264,7 @@ public class SMRDriver {
 								@Override
 								public boolean add(S3ObjectSummary s) throws Exception {
 
-									File split = File.createTempFile("split", ".raw");
+									File split = createTempFile("mapper input split " + s.getKey(), "split", ".raw");
 									try {
 										s3.getObject(new GetObjectRequest(bucket, s.getKey()), split);
 
@@ -288,7 +292,7 @@ public class SMRDriver {
 											});
 										}
 
-										final ICollector c = new ICollector() {
+										final ICollector collector = new ICollector() {
 											@Override
 											public void collect(byte[] key, byte[] value) throws Exception {
 												writer.write(writers.get(SimpleMapReduce.hash(key, hashes)), key, value);
@@ -299,11 +303,11 @@ public class SMRDriver {
 												: createInput(split), new ICollector() {
 											@Override
 											public void collect(byte[] key, byte[] value) throws Exception {
-												mapper.map(key, value, c);
+												mapper.map(key, value, collector);
 											}
 										});
 									} finally {
-										split.delete();
+										delete(split);
 									}
 
 									return true;
@@ -324,7 +328,7 @@ public class SMRDriver {
 								File f = files.get(h);
 								String key = h + "/" + extractKey(in);
 								s3.putObject(shuffleBucket, key, f);
-								f.delete();
+								delete(f);
 							}
 
 							SimpleDbCommitter.commitNewAttribute(db, dom, in.toString(), "mapped", "1");
@@ -363,7 +367,7 @@ public class SMRDriver {
 		return new GZIPOutputStream(new BufferedOutputStream(new FileOutputStream(f)));
 	}
 
-	private static class Holder<T> {
+	private static class Envelope<T> {
 		public T item;
 	}
 
@@ -424,12 +428,12 @@ public class SMRDriver {
 								throw new Exception("missing some map outputs");
 							}
 
-							File all = File.createTempFile("all", ".gz");
+							File all = createTempFile("sum of shuffles", "all", ".gz");
 							final OutputStream pw = createCompressingOutput(all);
 							try {
 								for (String k : s3Keys) {
 
-									File tmp = File.createTempFile("file", ".gz");
+									File tmp = createTempFile("shuffle " + k, "file", ".gz");
 									try {
 										s3.getObject(new GetObjectRequest(extractBucket(in), k), tmp);
 										reader.readFully(createDecompressingInput(tmp), new ICollector() {
@@ -440,56 +444,59 @@ public class SMRDriver {
 										});
 
 									} finally {
-										tmp.delete();
+										delete(tmp);
 									}
 								}
 							} finally {
 								pw.close();
 							}
 
-							File sorted = File.createTempFile("sorted", ".gz");
+							File sorted = createTempFile("sorted shuffle", "sorted", ".gz");
 							MergeSort.mergeSort(100000000, all, sorted, comp, reader, writer);
 
-							File out2 = File.createTempFile("output", ".gz");
+							File out2 = createTempFile("reducer output", "output", ".gz");
 							try {
 
-								final OutputStream out3 = createCompressingOutput(out2);
+								final OutputStream reducerOutput = createCompressingOutput(out2);
 								try {
-									final List<byte[]> values = new LinkedList<byte[]>();
-									final Holder<MyByteBuffer> last = new Holder<SMRDriver.MyByteBuffer>();
-									final ICollector cc = new ICollector() {
+
+									final ICollector collector = new ICollector() {
 										@Override
 										public void collect(byte[] key, byte[] value) throws Exception {
-											writer.write(out3, key, value);
+											writer.write(reducerOutput, key, value);
 										}
 									};
+
+									final List<byte[]> currentValues = new LinkedList<byte[]>();
+									final Envelope<MyByteBuffer> currentKey = new Envelope<SMRDriver.MyByteBuffer>();
 
 									reader.readFully(createDecompressingInput(sorted), new ICollector() {
 
 										@Override
 										public void collect(byte[] key, byte[] value) throws Exception {
+
 											MyByteBuffer b = new MyByteBuffer(key);
-											if (last.item == null) {
-												// first call
-												values.add(value);
-											} else if (!last.item.equals(b)) {
-												// new key
-												values.add(value);
-												reducer.reduce(b.buf, values.iterator(), cc);
-												values.clear();
-											} else {
-												values.add(value);
+
+											if (currentKey.item != null) {
+												if (!currentKey.item.equals(b)) {
+													// new key
+													reducer.reduce(currentKey.item.buf, currentValues.iterator(),
+															collector);
+													currentValues.clear();
+												}
 											}
 
-											last.item = b;
+											currentValues.add(value);
+											currentKey.item = b;
 										}
 									});
 
-									if (values.size() > 0) {
-										reducer.reduce(last.item.buf, values.iterator(), cc);
+									if (currentValues.size() > 0) {
+										reducer.reduce(currentKey.item.buf, currentValues.iterator(), collector);
 									}
+
 								} finally {
-									out3.close();
+									reducerOutput.close();
 								}
 
 								s3.putObject(out, extractKey(in) + ".gz", out2);
@@ -499,7 +506,7 @@ public class SMRDriver {
 								sqs.deleteMessage(new DeleteMessageRequest(reduceQueue, m.getReceiptHandle()));
 
 							} finally {
-								out2.delete();
+								delete(out2);
 							}
 
 						} finally {
@@ -519,6 +526,22 @@ public class SMRDriver {
 			}
 		} finally {
 			ses.shutdown();
+		}
+	}
+
+	private static final boolean DEBUG_FILES = false;
+
+	private static File createTempFile(String msg, String a, String b) throws IOException {
+		File f = File.createTempFile(a, b);
+		if (DEBUG_FILES) {
+			logger.debugf("creating %s as %s", msg, f);
+		}
+		return f;
+	}
+
+	private static void delete(File f) {
+		if (!DEBUG_FILES) {
+			f.delete();
 		}
 	}
 
