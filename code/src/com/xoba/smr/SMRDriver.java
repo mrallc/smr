@@ -68,6 +68,8 @@ public class SMRDriver {
 
 	private static final ILogger logger = LogFactory.getDefault().create();
 
+	private static final boolean DEBUG_MODE = false;
+
 	public static void main(String[] args) throws Exception {
 
 		final Properties c = SimpleMapReduce.marshall(new String(MraUtils.convertFromHex(args[0])));
@@ -117,6 +119,7 @@ public class SMRDriver {
 
 					while (!done) {
 						try {
+
 							runMapper(mapReader, mapWriter, aws, dom, mapQueue, mapper,
 									new Boolean(c.getProperty(ConfigKey.IS_INPUT_COMPRESSED.toString())), mapOut,
 									hashes);
@@ -529,18 +532,16 @@ public class SMRDriver {
 		}
 	}
 
-	private static final boolean DEBUG_FILES = false;
-
 	private static File createTempFile(String msg, String a, String b) throws IOException {
 		File f = File.createTempFile(a, b);
-		if (DEBUG_FILES) {
+		if (DEBUG_MODE) {
 			logger.debugf("creating %s as %s", msg, f);
 		}
 		return f;
 	}
 
 	private static void delete(File f) {
-		if (!DEBUG_FILES) {
+		if (!DEBUG_MODE) {
 			f.delete();
 		}
 	}

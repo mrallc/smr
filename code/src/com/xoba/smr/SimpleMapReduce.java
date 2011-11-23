@@ -4,6 +4,7 @@ import java.io.PrintWriter;
 import java.io.StringReader;
 import java.io.StringWriter;
 import java.net.URI;
+import java.util.Collection;
 import java.util.Formatter;
 import java.util.Iterator;
 import java.util.LinkedList;
@@ -40,7 +41,8 @@ public class SimpleMapReduce {
 
 	private static final ILogger logger = LogFactory.getDefault().create();
 
-	public static void launch(Properties config, List<String> inputSplitPrefixes, int machineCount) throws Exception {
+	public static void launch(Properties config, Collection<String> inputSplitPrefixes, AmazonInstance ai,
+			int machineCount) throws Exception {
 
 		AWSCredentials aws = create(config);
 
@@ -88,7 +90,6 @@ public class SimpleMapReduce {
 
 			// run in the cloud
 			AmazonEC2 ec2 = new AmazonEC2Client(aws);
-			AmazonInstance ai = AmazonInstance.M2_4XLARGE;
 			String ud = produceUserData(ai, config,
 					new URI(config.getProperty(ConfigKey.RUNNABLE_JARFILE_URI.toString())));
 			System.out.println(ud);
@@ -159,7 +160,7 @@ public class SimpleMapReduce {
 		String[] parts = jarFileURI.getPath().split("/");
 		String jar = parts[parts.length - 1];
 
-		pw.printf("java -Xmx%.0fm -jar %s %s", 1000 * 0.8 * ai.getMemoryGB(), jar,
+		pw.printf("java -Xmx%.0fm -cp %s %s %s", 1000 * 0.8 * ai.getMemoryGB(), jar, SMRDriver.class.getName(),
 				MraUtils.convertToHex(serialize(c).getBytes()));
 		pw.println();
 
