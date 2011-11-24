@@ -22,7 +22,7 @@ import java.util.zip.GZIPOutputStream;
 
 import com.xoba.smr.impl.AsciiTSVReader;
 import com.xoba.smr.impl.AsciiTSVWriter;
-import com.xoba.smr.impl.StringsKVComparator;
+import com.xoba.smr.impl.RawKVComparator;
 import com.xoba.smr.inf.ICollector;
 import com.xoba.smr.inf.IKeyValueComparator;
 import com.xoba.smr.inf.IKeyValueReader;
@@ -49,7 +49,7 @@ public class MergeSort {
 		File out = new File("/tmp/out.txt.gz");
 
 		long start = System.currentTimeMillis();
-		mergeSort(10000000, in, out, new StringsKVComparator(), new AsciiTSVReader(), new AsciiTSVWriter());
+		mergeSort(10000000, in, out, new RawKVComparator(), new AsciiTSVReader(), new AsciiTSVWriter());
 		logger.debugf("sorted in %,d millis", System.currentTimeMillis() - start);
 	}
 
