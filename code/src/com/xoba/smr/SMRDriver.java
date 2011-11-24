@@ -193,9 +193,16 @@ public class SMRDriver {
 	public static String extractBucket(URI u) throws Exception {
 		if (u.getScheme().equals("s3")) {
 			if (u.isOpaque()) {
-				throw new Exception("bad uri: " + u);
+				String ssp = u.getSchemeSpecificPart();
+				int index = ssp.indexOf('/');
+				if (index == -1) {
+					return ssp;
+				} else {
+					return ssp.substring(0, index);
+				}
+			} else {
+				return u.getHost();
 			}
-			return u.getHost();
 		}
 		throw new IllegalArgumentException(u.toString());
 	}
@@ -203,9 +210,16 @@ public class SMRDriver {
 	public static String extractKey(URI u) throws Exception {
 		if (u.getScheme().equals("s3")) {
 			if (u.isOpaque()) {
-				throw new Exception("bad uri: " + u);
+				String ssp = u.getSchemeSpecificPart();
+				int index = ssp.indexOf('/');
+				if (index == -1) {
+					throw new IllegalArgumentException("bad uri: " + u);
+				} else {
+					return ssp.substring(index + 1, ssp.length());
+				}
+			} else {
+				return u.getPath().substring(1);
 			}
-			return u.getPath().substring(1);
 		}
 		throw new IllegalArgumentException(u.toString());
 	}
