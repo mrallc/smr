@@ -66,8 +66,6 @@ public class SMRDriver {
 				new URL[] { jar.toURL() }));
 
 		final String dom = c.getProperty(ConfigKey.SIMPLEDB_DOM.toString());
-		final String mapQueue = c.getProperty(ConfigKey.MAP_QUEUE.toString());
-		final String reduceQueue = c.getProperty(ConfigKey.REDUCE_QUEUE.toString());
 
 		final IKeyValueReader mapReader = SimpleMapReduce.load(cl, c, ConfigKey.MAP_READER, IKeyValueReader.class);
 		final IKeyValueWriter mapWriter = SimpleMapReduce.load(cl, c, ConfigKey.SHUFFLEWRITER, IKeyValueWriter.class);
@@ -81,8 +79,6 @@ public class SMRDriver {
 		final IMapper mapper = SimpleMapReduce.load(cl, c, ConfigKey.MAPPER, IMapper.class);
 		final IReducer reducer = SimpleMapReduce.load(cl, c, ConfigKey.REDUCER, IReducer.class);
 
-		final String mapOut = c.getProperty(ConfigKey.SHUFFLE_BUCKET.toString());
-		final String reduceOut = c.getProperty(ConfigKey.REDUCE_OUTPUTS_BUCKET.toString());
 		final long hashes = new Long(c.getProperty(ConfigKey.HASH_CARDINALITY.toString()));
 
 		int threadCount = c.containsKey(ConfigKey.THREADS_PER_MACHINE.toString()) ? new Integer(
