@@ -127,16 +127,16 @@ public class SMRDriver {
 
 					try {
 
-						Thread.sleep(new Random().nextInt(3000));
+						Thread.sleep(new Random().nextInt(30000));
 
-						if (countCommitted(aws, dom, "sns") < 1) {
-							AmazonSimpleDB db = new AmazonSimpleDBClient(aws);
-							if (c.containsKey(ConfigKey.SNS_ARN.toString())) {
+						if (c.containsKey(ConfigKey.SNS_ARN.toString())) {
+							if (countCommitted(aws, dom, "sns") < 1) {
+								AmazonSimpleDB db = new AmazonSimpleDBClient(aws);
 								String arn = c.getProperty(ConfigKey.SNS_ARN.toString());
 								AmazonSNS sns = new AmazonSNSClient(aws);
 								sns.publish(new PublishRequest(arn, "done"));
+								SimpleDbCommitter.commitNewAttribute(db, dom, "notifications", "sns", "1");
 							}
-							SimpleDbCommitter.commitNewAttribute(db, dom, "notifications", "sns", "1");
 						}
 
 					} catch (Exception e) {
