@@ -13,24 +13,15 @@ import java.net.URL;
 import java.net.URLClassLoader;
 import java.util.Arrays;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Random;
-import java.util.Set;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ScheduledFuture;
-import java.util.concurrent.TimeUnit;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
 
 import com.amazonaws.auth.AWSCredentials;
-import com.amazonaws.services.s3.AmazonS3;
-import com.amazonaws.services.s3.model.GetObjectRequest;
-import com.amazonaws.services.s3.model.S3ObjectSummary;
 import com.amazonaws.services.simpledb.AmazonSimpleDB;
 import com.amazonaws.services.simpledb.AmazonSimpleDBClient;
 import com.amazonaws.services.simpledb.model.Attribute;
@@ -40,19 +31,10 @@ import com.amazonaws.services.simpledb.model.SelectResult;
 import com.amazonaws.services.sns.AmazonSNS;
 import com.amazonaws.services.sns.AmazonSNSClient;
 import com.amazonaws.services.sns.model.PublishRequest;
-import com.amazonaws.services.sqs.AmazonSQS;
-import com.amazonaws.services.sqs.AmazonSQSClient;
-import com.amazonaws.services.sqs.model.ChangeMessageVisibilityRequest;
-import com.amazonaws.services.sqs.model.DeleteMessageRequest;
-import com.amazonaws.services.sqs.model.GetQueueAttributesRequest;
-import com.amazonaws.services.sqs.model.Message;
-import com.amazonaws.services.sqs.model.ReceiveMessageRequest;
-import com.amazonaws.services.sqs.model.ReceiveMessageResult;
-import com.xoba.amazonaws.AWSUtils;
-import com.xoba.amazonaws.AWSUtils.IBucketListener;
 import com.xoba.smr.be.IBackend;
 import com.xoba.smr.be.IInputFile;
 import com.xoba.smr.be.MapperAWSBackend;
+import com.xoba.smr.be.ReducerAWSBackend;
 import com.xoba.smr.be.WorkUnit;
 import com.xoba.smr.inf.ICollector;
 import com.xoba.smr.inf.IKeyValueComparator;
@@ -121,11 +103,12 @@ public class SMRDriver {
 					while (!done) {
 						try {
 
-							runMapper(new MapperAWSBackend(c), mapReader, mapWriter, mapper, new Boolean(c.getProperty(ConfigKey.IS_INPUT_COMPRESSED.toString())), hashes);
+							runMapper(new MapperAWSBackend(c), mapReader, mapWriter, mapper,
+									new Boolean(c.getProperty(ConfigKey.IS_INPUT_COMPRESSED.toString())), hashes);
 
 							logger.debugf("done mapping");
 
-							runReducers(reduceReader, reduceWriter, aws, dom, reduceQueue, reducer, reduceOut, comp);
+							runReducers(new ReducerAWSBackend(c), reduceReader, reduceWriter, reducer, comp);
 
 							logger.debugf("done reducing");
 
@@ -337,162 +320,120 @@ public class SMRDriver {
 		public T item;
 	}
 
-	public static void runReducers(final IKeyValueReader reader, final IKeyValueWriter writer, AWSCredentials aws,
-			final String dom, final String reduceQueue, final IReducer reducer, String out, IKeyValueComparator comp)
-			throws Exception {
+	public static void runReducers(IBackend<WorkUnit> be, final IKeyValueReader reader, final IKeyValueWriter writer,
+			final IReducer reducer, IKeyValueComparator comp) throws Exception {
 
-		final AmazonS3 s3 = SimpleMapReduce.getS3(aws);
-		final AmazonSimpleDB db = new AmazonSimpleDBClient(aws);
-		final AmazonSQS sqs = new AmazonSQSClient(aws);
+		boolean done = false;
+		while (!done) {
 
-		ScheduledExecutorService ses = Executors.newScheduledThreadPool(1);
-		try {
-			boolean done = false;
-			while (!done) {
+			try {
 
-				try {
-					final int timeout = new Integer(sqs
-							.getQueueAttributes(
-									new GetQueueAttributesRequest(reduceQueue).withAttributeNames("VisibilityTimeout"))
-							.getAttributes().get("VisibilityTimeout"));
+				WorkUnit p = be.getNextWorkUnit();
+				if (p == null) {
+					Thread.sleep(1000);
+				} else {
 
-					ReceiveMessageResult r = sqs.receiveMessage(new ReceiveMessageRequest(reduceQueue));
+					logger.debugf("processing %s", p);
 
-					for (final Message m : r.getMessages()) {
+					try {
+						URI in = new URI(p.getProperty("input"));
 
-						ScheduledFuture<?> keepAlive = ses.scheduleAtFixedRate(new Runnable() {
-							@Override
-							public void run() {
-								sqs.changeMessageVisibility(new ChangeMessageVisibilityRequest(reduceQueue, m
-										.getReceiptHandle(), timeout));
-							}
-						}, timeout / 2, timeout, TimeUnit.SECONDS);
+						List<IInputFile> inputFiles = be.getInputFilesForWorkUnit(p);
+
+						File all = createTempFile("sum of shuffles", "all", ".gz");
+						final OutputStream pw = createCompressingOutput(all);
 						try {
-							Properties p = SimpleMapReduce.marshall(m.getBody());
+							for (IInputFile k : inputFiles) {
 
-							URI in = new URI(p.getProperty("input"));
-
-							logger.debugf("processing %s to %s", in, out);
-
-							final Set<String> s3Keys = new HashSet<String>();
-
-							AWSUtils.scanObjectsInBucket(s3, extractBucket(in), extractKey(in), new IBucketListener() {
-
-								@Override
-								public boolean add(S3ObjectSummary s) {
-									s3Keys.add(s.getKey());
-									return true;
-								}
-
-								@Override
-								public void done() {
-
-								}
-							});
-
-							if (s3Keys.size() != countCommitted(aws, dom, "mapped")) {
-								throw new Exception("missing some map outputs");
-							}
-
-							File all = createTempFile("sum of shuffles", "all", ".gz");
-							final OutputStream pw = createCompressingOutput(all);
-							try {
-								for (String k : s3Keys) {
-
-									File tmp = createTempFile("shuffle " + k, "file", ".gz");
-									try {
-										s3.getObject(new GetObjectRequest(extractBucket(in), k), tmp);
-										reader.readFully(createDecompressingInput(tmp), new ICollector() {
-											@Override
-											public void collect(byte[] key9, byte[] value9) throws Exception {
-												writer.write(pw, key9, value9);
-											}
-										});
-
-									} finally {
-										delete(tmp);
-									}
-								}
-							} finally {
-								pw.close();
-							}
-
-							File sorted = createTempFile("sorted shuffle", "sorted", ".gz");
-							MergeSort.mergeSort(100000000, all, sorted, comp, reader, writer);
-
-							File out2 = createTempFile("reducer output", "output", ".gz");
-							try {
-
-								final OutputStream reducerOutput = createCompressingOutput(out2);
+								File tmp = createTempFile("shuffle " + k, "file", ".gz");
 								try {
-
-									final ICollector collector = new ICollector() {
+									be.getInputFile(k.getURI(), tmp);
+									reader.readFully(createDecompressingInput(tmp), new ICollector() {
 										@Override
-										public void collect(byte[] key, byte[] value) throws Exception {
-											writer.write(reducerOutput, key, value);
-										}
-									};
-
-									final List<byte[]> currentValues = new LinkedList<byte[]>();
-									final Envelope<MyByteBuffer> currentKey = new Envelope<SMRDriver.MyByteBuffer>();
-
-									reader.readFully(createDecompressingInput(sorted), new ICollector() {
-
-										@Override
-										public void collect(byte[] key, byte[] value) throws Exception {
-
-											MyByteBuffer b = new MyByteBuffer(key);
-
-											if (currentKey.item != null) {
-												if (!currentKey.item.equals(b)) {
-													// new key
-													reducer.reduce(currentKey.item.buf, currentValues.iterator(),
-															collector);
-													currentValues.clear();
-												}
-											}
-
-											currentValues.add(value);
-											currentKey.item = b;
+										public void collect(byte[] key9, byte[] value9) throws Exception {
+											writer.write(pw, key9, value9);
 										}
 									});
 
-									if (currentValues.size() > 0) {
-										reducer.reduce(currentKey.item.buf, currentValues.iterator(), collector);
-									}
-
 								} finally {
-									reducerOutput.close();
+									delete(tmp);
+								}
+							}
+						} finally {
+							pw.close();
+						}
+
+						File sorted = createTempFile("sorted shuffle", "sorted", ".gz");
+						MergeSort.mergeSort(100000000, all, sorted, comp, reader, writer);
+
+						File out2 = createTempFile("reducer output", "output", ".gz");
+						try {
+
+							final OutputStream reducerOutput = createCompressingOutput(out2);
+							try {
+
+								final ICollector collector = new ICollector() {
+									@Override
+									public void collect(byte[] key, byte[] value) throws Exception {
+										writer.write(reducerOutput, key, value);
+									}
+								};
+
+								final List<byte[]> currentValues = new LinkedList<byte[]>();
+								final Envelope<MyByteBuffer> currentKey = new Envelope<SMRDriver.MyByteBuffer>();
+
+								reader.readFully(createDecompressingInput(sorted), new ICollector() {
+
+									@Override
+									public void collect(byte[] key, byte[] value) throws Exception {
+
+										MyByteBuffer b = new MyByteBuffer(key);
+
+										if (currentKey.item != null) {
+											if (!currentKey.item.equals(b)) {
+												// new key
+												reducer.reduce(currentKey.item.buf, currentValues.iterator(), collector);
+												currentValues.clear();
+											}
+										}
+
+										currentValues.add(value);
+										currentKey.item = b;
+									}
+								});
+
+								if (currentValues.size() > 0) {
+									reducer.reduce(currentKey.item.buf, currentValues.iterator(), collector);
 								}
 
-								s3.putObject(out, extractKey(in) + ".gz", out2);
-
-								SimpleDbCommitter.commitNewAttribute(db, dom, in.toString(), "reduced", "1");
-
-								sqs.deleteMessage(new DeleteMessageRequest(reduceQueue, m.getReceiptHandle()));
-
 							} finally {
-								delete(out2);
+								reducerOutput.close();
 							}
 
+							be.putResultFile(extractKey(in) + ".gz", out2);
+
+							be.commitWork(p);
+
 						} finally {
-							keepAlive.cancel(false);
+							delete(out2);
 						}
-					}
-				} catch (Exception e) {
-					e.printStackTrace();
-					Thread.sleep(1000);
-				} finally {
-					try {
-						done = isDone(aws, dom, "parameters", "hashes", "reduced");
-					} catch (Exception e) {
-						e.printStackTrace();
+					} finally {
+						be.releaseWork(p);
 					}
 				}
+
+			} catch (Exception e) {
+				e.printStackTrace();
+				Thread.sleep(1000);
+			} finally {
+				try {
+					done = be.isDone();
+				} catch (Exception e) {
+					e.printStackTrace();
+				}
 			}
-		} finally {
-			ses.shutdown();
 		}
+
 	}
 
 	private static File createTempFile(String msg, String a, String b) throws IOException {
@@ -540,7 +481,7 @@ public class SMRDriver {
 
 	}
 
-	private static long countCommitted(AWSCredentials aws, final String dom, String countAttr) throws Exception {
+	public static long countCommitted(AWSCredentials aws, final String dom, String countAttr) throws Exception {
 
 		final AmazonSimpleDB db = new AmazonSimpleDBClient(aws);
 

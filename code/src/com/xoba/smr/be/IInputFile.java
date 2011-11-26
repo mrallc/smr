@@ -9,4 +9,5 @@ public interface IInputFile {
 	public long getSize();
 
 	public String getLastModified();
+
 }
