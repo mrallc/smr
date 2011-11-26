@@ -11,7 +11,8 @@ public abstract class AbstractMapper implements IMapper {
 
 	@Override
 	public void beginContext(IMappingContext context) {
-		logger.debugf("mapping %s, created %s", context.getName(), context.getLastModified());
+		logger.debugf("mapping %s, created %s", context.getInputSplit().getURI(), context.getInputSplit()
+				.getLastModified());
 	}
 
 }

@@ -11,8 +11,6 @@ import java.io.OutputStream;
 import java.net.URI;
 import java.net.URL;
 import java.net.URLClassLoader;
-import java.text.DateFormat;
-import java.text.SimpleDateFormat;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -22,7 +20,6 @@ import java.util.Map;
 import java.util.Properties;
 import java.util.Random;
 import java.util.Set;
-import java.util.TimeZone;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
@@ -53,6 +50,10 @@ import com.amazonaws.services.sqs.model.ReceiveMessageRequest;
 import com.amazonaws.services.sqs.model.ReceiveMessageResult;
 import com.xoba.amazonaws.AWSUtils;
 import com.xoba.amazonaws.AWSUtils.IBucketListener;
+import com.xoba.smr.be.IBackend;
+import com.xoba.smr.be.IInputFile;
+import com.xoba.smr.be.MapperAWSBackend;
+import com.xoba.smr.be.WorkUnit;
 import com.xoba.smr.inf.ICollector;
 import com.xoba.smr.inf.IKeyValueComparator;
 import com.xoba.smr.inf.IKeyValueReader;
@@ -120,9 +121,7 @@ public class SMRDriver {
 					while (!done) {
 						try {
 
-							runMapper(mapReader, mapWriter, aws, dom, mapQueue, mapper,
-									new Boolean(c.getProperty(ConfigKey.IS_INPUT_COMPRESSED.toString())), mapOut,
-									hashes);
+							runMapper(new MapperAWSBackend(c), mapReader, mapWriter, mapper, new Boolean(c.getProperty(ConfigKey.IS_INPUT_COMPRESSED.toString())), hashes);
 
 							logger.debugf("done mapping");
 
@@ -224,152 +223,102 @@ public class SMRDriver {
 		throw new IllegalArgumentException(u.toString());
 	}
 
-	public static void runMapper(final IKeyValueReader reader, final IKeyValueWriter writer, AWSCredentials aws,
-			final String dom, final String mapInput, final IMapper mapper, final boolean isInputCompressed,
-			String shuffleBucket, final long hashes) throws Exception {
+	public static void runMapper(IBackend<WorkUnit> be, final IKeyValueReader reader, final IKeyValueWriter writer,
+			final IMapper mapper, final boolean isInputCompressed, final long hashes) throws Exception {
 
-		final AmazonS3 s3 = SimpleMapReduce.getS3(aws);
-		final AmazonSimpleDB db = new AmazonSimpleDBClient(aws);
-		final AmazonSQS sqs = new AmazonSQSClient(aws);
+		boolean done = false;
+		while (!done) {
 
-		ScheduledExecutorService ses = Executors.newScheduledThreadPool(1);
-		try {
-			boolean done = false;
-			while (!done) {
+			try {
 
-				try {
-					final int timeout = new Integer(sqs
-							.getQueueAttributes(
-									new GetQueueAttributesRequest(mapInput).withAttributeNames("VisibilityTimeout"))
-							.getAttributes().get("VisibilityTimeout"));
+				WorkUnit p = be.getNextWorkUnit();
 
-					ReceiveMessageResult r = sqs.receiveMessage(new ReceiveMessageRequest(mapInput));
+				if (p == null) {
+					Thread.sleep(1000);
+				} else {
+					try {
+						logger.debugf("processing %s", p);
 
-					for (final Message m : r.getMessages()) {
+						URI in = new URI(p.getProperty("input"));
 
-						ScheduledFuture<?> keepAlive = ses.scheduleAtFixedRate(new Runnable() {
-							@Override
-							public void run() {
-								sqs.changeMessageVisibility(new ChangeMessageVisibilityRequest(mapInput, m
-										.getReceiptHandle(), timeout));
-							}
-						}, timeout / 2, timeout, TimeUnit.SECONDS);
-						try {
-							Properties p = SimpleMapReduce.marshall(m.getBody());
+						final Map<String, File> files = new HashMap<String, File>();
+						final Map<String, OutputStream> writers = new HashMap<String, OutputStream>();
 
-							logger.debugf("processing %s", p);
+						for (String hash : SimpleMapReduce.getAllHashes(hashes)) {
+							File tmp = createTempFile("mapper hash output " + hash, "output", ".gz");
+							OutputStream pw = new BufferedOutputStream(createCompressingOutput(tmp));
+							files.put(hash, tmp);
+							writers.put(hash, pw);
+						}
 
-							URI in = new URI(p.getProperty("input"));
+						List<IInputFile> inputFiles = be.getInputFilesForWorkUnit(p);
 
-							final Map<String, File> files = new HashMap<String, File>();
-							final Map<String, OutputStream> writers = new HashMap<String, OutputStream>();
+						for (final IInputFile f : inputFiles) {
 
-							for (String hash : SimpleMapReduce.getAllHashes(hashes)) {
-								File tmp = createTempFile("mapper hash output " + hash, "output", ".gz");
-								OutputStream pw = new BufferedOutputStream(createCompressingOutput(tmp));
-								files.put(hash, tmp);
-								writers.put(hash, pw);
-							}
+							File split = createTempFile("mapper input split " + f.getURI(), "split", ".raw");
+							try {
+								be.getInputFile(f.getURI(), split);
 
-							final String bucket = extractBucket(in);
+								mapper.beginContext(new IMappingContext() {
 
-							final DateFormat df = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'");
-							df.setTimeZone(TimeZone.getTimeZone("GMT"));
-
-							AWSUtils.scanObjectsInBucket(s3, bucket, extractKey(in), new IBucketListener() {
-
-								@Override
-								public boolean add(S3ObjectSummary s) throws Exception {
-
-									File split = createTempFile("mapper input split " + s.getKey(), "split", ".raw");
-									try {
-										s3.getObject(new GetObjectRequest(bucket, s.getKey()), split);
-
-										{
-											final String name = "s3://" + bucket + "/" + s.getKey();
-											final long size = s.getSize();
-											final String lm = df.format(s.getLastModified());
-
-											mapper.beginContext(new IMappingContext() {
-
-												@Override
-												public String getLastModified() {
-													return lm;
-												}
-
-												@Override
-												public Long getSize() {
-													return size;
-												}
-
-												@Override
-												public String getName() {
-													return name;
-												}
-											});
-										}
-
-										final ICollector collector = new ICollector() {
-											@Override
-											public void collect(byte[] key, byte[] value) throws Exception {
-												writer.write(writers.get(SimpleMapReduce.hash(key, hashes)), key, value);
-											}
-										};
-
-										reader.readFully(isInputCompressed ? createDecompressingInput(split)
-												: createInput(split), new ICollector() {
-											@Override
-											public void collect(byte[] key, byte[] value) throws Exception {
-												mapper.map(key, value, collector);
-											}
-										});
-									} finally {
-										delete(split);
+									@Override
+									public IInputFile getInputSplit() {
+										return f;
 									}
 
-									return true;
-								}
+								});
 
-								@Override
-								public void done() {
+								final ICollector collector = new ICollector() {
+									@Override
+									public void collect(byte[] key, byte[] value) throws Exception {
+										writer.write(writers.get(SimpleMapReduce.hash(key, hashes)), key, value);
+									}
+								};
 
-								}
+								reader.readFully(isInputCompressed ? createDecompressingInput(split)
+										: createInput(split), new ICollector() {
+									@Override
+									public void collect(byte[] key, byte[] value) throws Exception {
+										mapper.map(key, value, collector);
+									}
+								});
 
-							});
-
-							for (OutputStream pw : writers.values()) {
-								pw.close();
+							} finally {
+								delete(split);
 							}
 
-							for (String h : files.keySet()) {
-								File f = files.get(h);
-								String key = h + "/" + extractKey(in);
-								s3.putObject(shuffleBucket, key, f);
-								delete(f);
-							}
-
-							SimpleDbCommitter.commitNewAttribute(db, dom, in.toString(), "mapped", "1");
-
-							sqs.deleteMessage(new DeleteMessageRequest(mapInput, m.getReceiptHandle()));
-
-						} finally {
-							keepAlive.cancel(false);
 						}
-					}
-				} catch (Exception e) {
-					e.printStackTrace();
-					Thread.sleep(1000);
-				} finally {
-					try {
-						done = isDone(aws, dom, "parameters", "splits", "mapped");
-					} catch (Exception e) {
-						e.printStackTrace();
+
+						for (OutputStream pw : writers.values()) {
+							pw.close();
+						}
+
+						for (String h : files.keySet()) {
+							File f = files.get(h);
+							String key = h + "/" + extractKey(in);
+							be.putResultFile(key, f);
+							delete(f);
+						}
+
+						be.commitWork(p);
+
+					} finally {
+						be.releaseWork(p);
 					}
 				}
+
+			} catch (Exception e) {
+				e.printStackTrace();
+				Thread.sleep(1000);
+			} finally {
+				try {
+					done = be.isDone();
+				} catch (Exception e) {
+					e.printStackTrace();
+				}
 			}
-		} finally {
-			ses.shutdown();
 		}
+
 	}
 
 	private static InputStream createInput(File f) throws Exception {
@@ -623,7 +572,7 @@ public class SMRDriver {
 		return foundCommitted;
 	}
 
-	private static boolean isDone(AWSCredentials aws, final String dom, String item, String targetAttr, String countAttr)
+	public static boolean isDone(AWSCredentials aws, final String dom, String item, String targetAttr, String countAttr)
 			throws Exception {
 
 		final AmazonSimpleDB db = new AmazonSimpleDBClient(aws);
