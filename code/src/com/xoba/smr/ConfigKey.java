@@ -2,6 +2,8 @@ package com.xoba.smr;
 
 public enum ConfigKey {
 
+	JOB_ID,
+
 	AWS_KEYID, AWS_SECRETKEY,
 
 	MAP_QUEUE, REDUCE_QUEUE,

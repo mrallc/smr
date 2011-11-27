@@ -12,6 +12,7 @@ import java.util.List;
 import java.util.Properties;
 import java.util.Set;
 import java.util.SortedSet;
+import java.util.TreeMap;
 import java.util.TreeSet;
 
 import org.apache.commons.codec.binary.Base64;
@@ -51,6 +52,13 @@ public class SimpleMapReduce {
 
 	public static void launch(Properties config, Collection<String> inputSplitPrefixes, AmazonInstance ai,
 			int machineCount, boolean spotInstances) throws Exception {
+
+		if (!config.containsKey(ConfigKey.JOB_ID.toString())) {
+			config.put(ConfigKey.JOB_ID.toString(), MraUtils.md5Hash(new TreeMap<Object, Object>(config).toString())
+					.substring(0, 8));
+		}
+
+		String id = config.getProperty(ConfigKey.JOB_ID.toString());
 
 		AWSCredentials aws = create(config);
 
@@ -100,8 +108,6 @@ public class SimpleMapReduce {
 
 			String userData = produceUserData(ai, config,
 					new URI(config.getProperty(ConfigKey.RUNNABLE_JARFILE_URI.toString())));
-
-			String id = MraUtils.md5Hash(userData).substring(0, 8);
 
 			logger.debugf("launching job with id %s:", id);
 
@@ -218,13 +224,6 @@ public class SimpleMapReduce {
 			}
 		});
 		return s3;
-	}
-
-	@SuppressWarnings("unchecked")
-	public static <T> T load(ClassLoader cl, Properties p, ConfigKey c, Class<T> x) throws Exception {
-		T y = (T) cl.loadClass(p.getProperty(c.toString())).newInstance();
-		logger.debugf("%s -> %s", c, y);
-		return y;
 	}
 
 	public static String prefixedName(String p, String n) {

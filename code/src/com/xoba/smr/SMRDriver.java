@@ -17,20 +17,9 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
-import java.util.Random;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
 
-import com.amazonaws.auth.AWSCredentials;
-import com.amazonaws.services.simpledb.AmazonSimpleDB;
-import com.amazonaws.services.simpledb.AmazonSimpleDBClient;
-import com.amazonaws.services.simpledb.model.Attribute;
-import com.amazonaws.services.simpledb.model.Item;
-import com.amazonaws.services.simpledb.model.SelectRequest;
-import com.amazonaws.services.simpledb.model.SelectResult;
-import com.amazonaws.services.sns.AmazonSNS;
-import com.amazonaws.services.sns.AmazonSNSClient;
-import com.amazonaws.services.sns.model.PublishRequest;
 import com.xoba.smr.be.IBackend;
 import com.xoba.smr.be.IInputFile;
 import com.xoba.smr.be.MapperAWSBackend;
@@ -57,7 +46,9 @@ public class SMRDriver {
 
 		final Properties c = SimpleMapReduce.marshall(new String(MraUtils.convertFromHex(args[0])));
 
-		final AWSCredentials aws = SimpleMapReduce.create(c);
+		for (Object o : c.keySet()) {
+			logger.debugf("%s = %s", o, c.get(o));
+		}
 
 		URI jar = c.containsKey(ConfigKey.CLASSPATH_JAR.toString()) ? new URI(c.getProperty(ConfigKey.CLASSPATH_JAR
 				.toString())) : null;
@@ -65,26 +56,19 @@ public class SMRDriver {
 		ClassLoader cl = (jar == null ? Thread.currentThread().getContextClassLoader() : new URLClassLoader(
 				new URL[] { jar.toURL() }));
 
-		final String dom = c.getProperty(ConfigKey.SIMPLEDB_DOM.toString());
+		final IMapper mapper = loadClass(cl, c, ConfigKey.MAPPER, IMapper.class);
+		final IReducer reducer = loadClass(cl, c, ConfigKey.REDUCER, IReducer.class);
 
-		final IKeyValueReader mapReader = SimpleMapReduce.load(cl, c, ConfigKey.MAP_READER, IKeyValueReader.class);
-		final IKeyValueWriter mapWriter = SimpleMapReduce.load(cl, c, ConfigKey.SHUFFLEWRITER, IKeyValueWriter.class);
-		final IKeyValueReader reduceReader = SimpleMapReduce
-				.load(cl, c, ConfigKey.SHUFFLEREADER, IKeyValueReader.class);
-		final IKeyValueWriter reduceWriter = SimpleMapReduce.load(cl, c, ConfigKey.REDUCEWRITER, IKeyValueWriter.class);
-
-		final IKeyValueComparator comp = SimpleMapReduce.load(cl, c, ConfigKey.SHUFFLE_COMPARATOR,
-				IKeyValueComparator.class);
-
-		final IMapper mapper = SimpleMapReduce.load(cl, c, ConfigKey.MAPPER, IMapper.class);
-		final IReducer reducer = SimpleMapReduce.load(cl, c, ConfigKey.REDUCER, IReducer.class);
+		final IKeyValueReader mapReader = loadClass(cl, c, ConfigKey.MAP_READER, IKeyValueReader.class);
+		final IKeyValueWriter mapWriter = loadClass(cl, c, ConfigKey.SHUFFLEWRITER, IKeyValueWriter.class);
+		final IKeyValueReader reduceReader = SMRDriver.loadClass(cl, c, ConfigKey.SHUFFLEREADER, IKeyValueReader.class);
+		final IKeyValueWriter reduceWriter = loadClass(cl, c, ConfigKey.REDUCEWRITER, IKeyValueWriter.class);
+		final IKeyValueComparator comp = loadClass(cl, c, ConfigKey.SHUFFLE_COMPARATOR, IKeyValueComparator.class);
 
 		final long hashes = new Long(c.getProperty(ConfigKey.HASH_CARDINALITY.toString()));
 
 		int threadCount = c.containsKey(ConfigKey.THREADS_PER_MACHINE.toString()) ? new Integer(
 				c.getProperty(ConfigKey.THREADS_PER_MACHINE.toString())) : Runtime.getRuntime().availableProcessors();
-
-		logger.debugf("threadcount = %,d", threadCount);
 
 		List<Thread> threads = new LinkedList<Thread>();
 
@@ -102,11 +86,7 @@ public class SMRDriver {
 							runMapper(new MapperAWSBackend(c), mapReader, mapWriter, mapper,
 									new Boolean(c.getProperty(ConfigKey.IS_INPUT_COMPRESSED.toString())), hashes);
 
-							logger.debugf("done mapping");
-
-							runReducers(new ReducerAWSBackend(c), reduceReader, reduceWriter, reducer, comp);
-
-							logger.debugf("done reducing");
+							runReducer(new ReducerAWSBackend(c), reduceReader, reduceWriter, reducer, comp);
 
 							done = true;
 
@@ -125,23 +105,6 @@ public class SMRDriver {
 						}
 					}
 
-					try {
-
-						Thread.sleep(new Random().nextInt(30000));
-
-						if (c.containsKey(ConfigKey.SNS_ARN.toString())) {
-							if (countCommitted(aws, dom, "sns") < 1) {
-								AmazonSimpleDB db = new AmazonSimpleDBClient(aws);
-								String arn = c.getProperty(ConfigKey.SNS_ARN.toString());
-								AmazonSNS sns = new AmazonSNSClient(aws);
-								sns.publish(new PublishRequest(arn, "done"));
-								SimpleDbCommitter.commitNewAttribute(db, dom, "notifications", "sns", "1");
-							}
-						}
-
-					} catch (Exception e) {
-						logger.warnf("failed to send notification: %s", e);
-					}
 				}
 			};
 
@@ -204,6 +167,12 @@ public class SMRDriver {
 
 	public static void runMapper(IBackend<WorkUnit> be, final IKeyValueReader reader, final IKeyValueWriter writer,
 			final IMapper mapper, final boolean isInputCompressed, final long hashes) throws Exception {
+
+		try {
+			be.sendNotification("mapping");
+		} catch (Exception e) {
+			logger.warnf("can't send notification: %s", e);
+		}
 
 		boolean done = false;
 		while (!done) {
@@ -316,8 +285,14 @@ public class SMRDriver {
 		public T item;
 	}
 
-	public static void runReducers(IBackend<WorkUnit> be, final IKeyValueReader reader, final IKeyValueWriter writer,
+	public static void runReducer(IBackend<WorkUnit> be, final IKeyValueReader reader, final IKeyValueWriter writer,
 			final IReducer reducer, IKeyValueComparator comp) throws Exception {
+
+		try {
+			be.sendNotification("reducing");
+		} catch (Exception e) {
+			logger.warnf("can't send notification: %s", e);
+		}
 
 		boolean done = false;
 		while (!done) {
@@ -325,6 +300,7 @@ public class SMRDriver {
 			try {
 
 				WorkUnit p = be.getNextWorkUnit();
+
 				if (p == null) {
 					Thread.sleep(1000);
 				} else {
@@ -332,7 +308,6 @@ public class SMRDriver {
 					logger.debugf("processing %s", p);
 
 					try {
-						URI in = new URI(p.getProperty("input"));
 
 						List<IInputFile> inputFiles = be.getInputFilesForWorkUnit(p);
 
@@ -376,7 +351,7 @@ public class SMRDriver {
 								};
 
 								final List<byte[]> currentValues = new LinkedList<byte[]>();
-								final Envelope<MyByteBuffer> currentKey = new Envelope<SMRDriver.MyByteBuffer>();
+								final Envelope<MyByteBuffer> currentKey = new Envelope<MyByteBuffer>();
 
 								reader.readFully(createDecompressingInput(sorted), new ICollector() {
 
@@ -406,7 +381,7 @@ public class SMRDriver {
 								reducerOutput.close();
 							}
 
-							be.putResultFile(extractKey(in) + ".gz", out2);
+							be.putResultFile(extractKey(new URI(p.getProperty("input"))) + ".gz", out2);
 
 							be.commitWork(p);
 
@@ -428,6 +403,12 @@ public class SMRDriver {
 					e.printStackTrace();
 				}
 			}
+		}
+
+		try {
+			be.sendNotification("done");
+		} catch (Exception e) {
+			logger.warnf("can't send notification: %s", e);
 		}
 
 	}
@@ -477,78 +458,10 @@ public class SMRDriver {
 
 	}
 
-	public static long countCommitted(AWSCredentials aws, final String dom, String countAttr) throws Exception {
-
-		final AmazonSimpleDB db = new AmazonSimpleDBClient(aws);
-
-		long foundCommitted = 0;
-		String expr = "select * from " + dom;
-		SelectResult sr = db.select(new SelectRequest(expr, true));
-		boolean done = false;
-		while (!done) {
-			List<Item> items = sr.getItems();
-			for (Item i : items) {
-				Map<String, String> map = new HashMap<String, String>();
-				for (Attribute a : i.getAttributes()) {
-					map.put(a.getName(), a.getValue());
-				}
-				if (map.containsKey(countAttr)) {
-					foundCommitted += new Long(map.get(countAttr));
-				}
-			}
-			String t = sr.getNextToken();
-			if (t == null) {
-				done = true;
-			} else {
-				SelectRequest req = new SelectRequest(expr, true);
-				req.setNextToken(t);
-				sr = db.select(req);
-			}
-		}
-
-		return foundCommitted;
+	@SuppressWarnings("unchecked")
+	public static <T> T loadClass(ClassLoader cl, Properties p, ConfigKey c, Class<T> x) throws Exception {
+		T y = (T) cl.loadClass(p.getProperty(c.toString())).newInstance();
+		logger.debugf("%s -> %s", c, y);
+		return y;
 	}
-
-	public static boolean isDone(AWSCredentials aws, final String dom, String item, String targetAttr, String countAttr)
-			throws Exception {
-
-		final AmazonSimpleDB db = new AmazonSimpleDBClient(aws);
-
-		Long splits = null;
-
-		long foundCommitted = 0;
-		String expr = "select * from " + dom;
-		SelectResult sr = db.select(new SelectRequest(expr, true));
-		boolean done = false;
-		while (!done) {
-			List<Item> items = sr.getItems();
-			for (Item i : items) {
-				String name = i.getName();
-				Map<String, String> map = new HashMap<String, String>();
-				for (Attribute a : i.getAttributes()) {
-					map.put(a.getName(), a.getValue());
-				}
-				if (name.equals(item)) {
-					splits = new Long(map.get(targetAttr));
-				} else if (map.containsKey(countAttr)) {
-					foundCommitted += new Long(map.get(countAttr));
-				}
-			}
-			String t = sr.getNextToken();
-			if (t == null) {
-				done = true;
-			} else {
-				SelectRequest req = new SelectRequest(expr, true);
-				req.setNextToken(t);
-				sr = db.select(req);
-			}
-		}
-
-		if (splits == null) {
-			return false;
-		}
-
-		return splits == foundCommitted;
-	}
-
 }

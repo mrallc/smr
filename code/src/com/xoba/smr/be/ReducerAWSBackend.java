@@ -4,7 +4,7 @@ import java.util.List;
 import java.util.Properties;
 
 import com.xoba.smr.ConfigKey;
-import com.xoba.smr.SMRDriver;
+import com.xoba.smr.SimpleDbCommitter;
 
 public class ReducerAWSBackend extends AbstractBackend {
 
@@ -27,7 +27,7 @@ public class ReducerAWSBackend extends AbstractBackend {
 
 		List<IInputFile> out = super.getInputFilesForWorkUnit(p);
 
-		if (out.size() != SMRDriver.countCommitted(aws, dom, "mapped")) {
+		if (out.size() != SimpleDbCommitter.countCommitted(db, dom, "mapped")) {
 			throw new Exception("missing some map outputs");
 		}
 

@@ -8,6 +8,7 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.Properties;
 import java.util.TimeZone;
+import java.util.concurrent.Callable;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
@@ -19,6 +20,10 @@ import com.amazonaws.services.s3.model.GetObjectRequest;
 import com.amazonaws.services.s3.model.S3ObjectSummary;
 import com.amazonaws.services.simpledb.AmazonSimpleDB;
 import com.amazonaws.services.simpledb.AmazonSimpleDBClient;
+import com.amazonaws.services.sns.AmazonSNS;
+import com.amazonaws.services.sns.AmazonSNSClient;
+import com.amazonaws.services.sns.model.PublishRequest;
+import com.amazonaws.services.sns.model.PublishResult;
 import com.amazonaws.services.sqs.AmazonSQS;
 import com.amazonaws.services.sqs.AmazonSQSClient;
 import com.amazonaws.services.sqs.model.ChangeMessageVisibilityRequest;
@@ -33,16 +38,41 @@ import com.xoba.smr.ConfigKey;
 import com.xoba.smr.SMRDriver;
 import com.xoba.smr.SimpleDbCommitter;
 import com.xoba.smr.SimpleMapReduce;
+import com.xoba.util.ILogger;
+import com.xoba.util.LogFactory;
+import com.xoba.util.MraUtils;
 
 public abstract class AbstractBackend implements IBackend<WorkUnit> {
+
+	private static final ILogger logger = LogFactory.getDefault().create();
+
+	@Override
+	public synchronized void sendNotification(final String type) throws Exception {
+		logger.debugf("snsNotify: %s", type);
+		if (snsARN != null) {
+			PublishResult r = SimpleDbCommitter.tryToRunIdempotentTaskOnce(db, dom, "notifications",
+					"I" + MraUtils.md5Hash(type), new Callable<PublishResult>() {
+						@Override
+						public PublishResult call() throws Exception {
+							return sns.publish(new PublishRequest(snsARN, jobID + ": " + type));
+						}
+					});
+			if (r != null) {
+				logger.debugf("published: %s", r);
+			}
+		}
+
+	}
 
 	protected final AWSCredentials aws;
 	protected final AmazonS3 s3;
 	protected final AmazonSimpleDB db;
 	protected final AmazonSQS sqs;
+	protected final AmazonSNS sns;
 	protected final String workQueue, dom, outputBucket;
 	protected final ScheduledExecutorService ses = Executors.newScheduledThreadPool(1);
 	protected final int timeout;
+	private final String jobID, snsARN;
 
 	public AbstractBackend(Properties c, ConfigKey queue, ConfigKey outputBucket) {
 
@@ -51,11 +81,15 @@ public abstract class AbstractBackend implements IBackend<WorkUnit> {
 		this.db = new AmazonSimpleDBClient(aws);
 		this.s3 = SimpleMapReduce.getS3(aws);
 		this.sqs = new AmazonSQSClient(aws);
+		this.sns = new AmazonSNSClient(aws);
 
 		this.dom = c.getProperty(ConfigKey.SIMPLEDB_DOM.toString());
 
 		this.workQueue = c.getProperty(queue.toString());
 		this.outputBucket = c.getProperty(outputBucket.toString());
+
+		this.jobID = c.getProperty(ConfigKey.JOB_ID.toString());
+		this.snsARN = c.getProperty(ConfigKey.SNS_ARN.toString());
 
 		timeout = new Integer(sqs
 				.getQueueAttributes(new GetQueueAttributesRequest(workQueue).withAttributeNames("VisibilityTimeout"))
@@ -70,8 +104,8 @@ public abstract class AbstractBackend implements IBackend<WorkUnit> {
 		s3.getObject(new GetObjectRequest(bucket, key), f);
 	}
 
-	public boolean isDone(String a, String b) throws Exception {
-		boolean done = SMRDriver.isDone(aws, dom, "parameters", a, b);
+	protected boolean isDone(String targetAttr, String countAttr) throws Exception {
+		boolean done = SimpleDbCommitter.isDone(db, dom, "parameters", targetAttr, countAttr);
 		if (done) {
 			ses.shutdown();
 		}

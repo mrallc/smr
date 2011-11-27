@@ -24,4 +24,6 @@ public interface IBackend<T extends Properties> {
 
 	public boolean isDone() throws Exception;
 
+	public void sendNotification(String type) throws Exception;
+
 }
