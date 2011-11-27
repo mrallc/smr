@@ -23,6 +23,9 @@ import com.amazonaws.services.ec2.AmazonEC2;
 import com.amazonaws.services.ec2.AmazonEC2Client;
 import com.amazonaws.services.ec2.model.CreateTagsRequest;
 import com.amazonaws.services.ec2.model.Instance;
+import com.amazonaws.services.ec2.model.LaunchSpecification;
+import com.amazonaws.services.ec2.model.RequestSpotInstancesRequest;
+import com.amazonaws.services.ec2.model.RequestSpotInstancesResult;
 import com.amazonaws.services.ec2.model.RunInstancesRequest;
 import com.amazonaws.services.ec2.model.RunInstancesResult;
 import com.amazonaws.services.ec2.model.Tag;
@@ -43,6 +46,11 @@ public class SimpleMapReduce {
 
 	public static void launch(Properties config, Collection<String> inputSplitPrefixes, AmazonInstance ai,
 			int machineCount) throws Exception {
+		launch(config, inputSplitPrefixes, ai, machineCount, true);
+	}
+
+	public static void launch(Properties config, Collection<String> inputSplitPrefixes, AmazonInstance ai,
+			int machineCount, boolean spotInstances) throws Exception {
 
 		AWSCredentials aws = create(config);
 
@@ -89,18 +97,47 @@ public class SimpleMapReduce {
 		} else if (machineCount > 1) {
 
 			// run in the cloud
-			AmazonEC2 ec2 = new AmazonEC2Client(aws);
-			String ud = produceUserData(ai, config,
+
+			String userData = produceUserData(ai, config,
 					new URI(config.getProperty(ConfigKey.RUNNABLE_JARFILE_URI.toString())));
-			System.out.println(ud);
-			RunInstancesRequest req = new RunInstancesRequest(ai.getDefaultAMI(), machineCount, machineCount);
-			req.setInstanceType(ai.getApiName());
-			req.setKeyName("mrascratch");
-			req.setInstanceInitiatedShutdownBehavior("terminate");
-			req.setUserData(new String(new Base64().encode(ud.getBytes("US-ASCII"))));
-			RunInstancesResult resp = ec2.runInstances(req);
-			logger.debugf("reservation id = %s", resp.getReservation().getReservationId());
-			labelEc2Instance(ec2, resp, "test");
+
+			String id = MraUtils.md5Hash(userData).substring(0, 8);
+
+			logger.debugf("launching job with id %s:", id);
+
+			System.out.println(userData);
+
+			AmazonEC2 ec2 = new AmazonEC2Client(aws);
+
+			if (spotInstances) {
+
+				RequestSpotInstancesRequest sir = new RequestSpotInstancesRequest();
+				sir.setSpotPrice(new Double(ai.getPrice()).toString());
+				sir.setInstanceCount(machineCount);
+				sir.setType("one-time");
+
+				LaunchSpecification spec = new LaunchSpecification();
+				spec.setImageId(ai.getDefaultAMI());
+				spec.setUserData(new String(new Base64().encode(userData.getBytes("US-ASCII"))));
+				spec.setInstanceType(ai.getApiName());
+
+				sir.setLaunchSpecification(spec);
+
+				RequestSpotInstancesResult result = ec2.requestSpotInstances(sir);
+
+				logger.debugf("spot instance request result: %s", result);
+
+			} else {
+
+				RunInstancesRequest req = new RunInstancesRequest(ai.getDefaultAMI(), machineCount, machineCount);
+				req.setClientToken(id);
+				req.setInstanceType(ai.getApiName());
+				req.setInstanceInitiatedShutdownBehavior("terminate");
+				req.setUserData(new String(new Base64().encode(userData.getBytes("US-ASCII"))));
+				RunInstancesResult resp = ec2.runInstances(req);
+				logger.debugf("on demand reservation id: %s", resp.getReservation().getReservationId());
+				labelEc2Instance(ec2, resp, "smr-" + id);
+			}
 		}
 	}
 
