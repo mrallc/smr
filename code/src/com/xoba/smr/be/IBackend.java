@@ -8,7 +8,8 @@ import java.util.Properties;
 public interface IBackend<T extends Properties> {
 
 	/**
-	 * releaseWork must be called eventually
+	 * releaseWork must be called eventually, whether or not commitWork is
+	 * called
 	 */
 	public T getNextWorkUnit() throws Exception;
 
