@@ -1,5 +1,6 @@
 simple mapreduce: inspired by hadoop and cloud mapreduce; aims to be
-significantly more robust, simpler, and faster.
+significantly more robust, simpler, and faster (to the extent that
+streaming data from S3 is not a bottleneck).
 
 instructions:
 
