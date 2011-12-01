@@ -5,6 +5,5 @@
 	<classpathentry combineaccessrules="false" kind="src" path="/com.xoba.amazonaws"/>
 	<classpathentry combineaccessrules="false" kind="src" path="/mra-lib"/>
 	<classpathentry combineaccessrules="false" kind="src" path="/com.xoba.apache"/>
-	<classpathentry kind="lib" path="lib/jtar/jtar-1.0.4.jar"/>
 	<classpathentry kind="output" path="bin"/>
 </classpath>
